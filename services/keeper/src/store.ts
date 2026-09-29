@@ -5,6 +5,7 @@ const diagnostics = createLogger("services.keeper.src.store");
 import * as fs from "fs";
 import * as path from "path";
 import { systemClock } from "@sub-rosa/time";
+import type { KeeperDryRunPhase } from "./dry-run.js";
 
 export interface WatchedRound {
   roundId: string;
@@ -12,6 +13,9 @@ export interface WatchedRound {
   network?: string;
   revealRound?: string;
   lastStatus: string;
+  phase?: KeeperDryRunPhase;
+  cursor?: number | string;
+  lastHash?: string;
   retryCount: number;
   lastError?: string;
   lastAction?: string;
