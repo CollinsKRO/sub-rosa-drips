@@ -26,14 +26,22 @@ import {
   LIVE_REVEAL_IN_SECONDS,
   LIVE_REVEAL_WINDOW_AFTER_REVEAL_SECONDS,
   NETWORK,
+  detectChainNetworkPassphrase,
   displayError,
   formatDemoAmount,
   freighterError,
   resolveFreighterAddress,
+  sdkClientNetworkPassphrase,
   sha256Bytes,
   toDemoEscrowAmount,
   useWalletContract,
 } from "../lib/chain";
+import {
+  assertDemoNetworkMatch,
+  demoNetworkMismatch,
+  DemoNetworkMismatchError,
+  type DemoActionName,
+} from "../lib/network-guard";
 import { DEMO_TRACE } from "../demo/trace";
 import { formatCountdown, useDrandCountdown } from "./useDrandCountdown";
 import { useToast } from "../ui/Toast";
@@ -91,6 +99,10 @@ export function useRoundSession(active: UseCase) {
   const [revealProgress, setRevealProgress] = useState<{ current: number; total: number } | null>(
     null,
   );
+  const [networkMismatch, setNetworkMismatch] = useState<{
+    chainNetwork: string;
+    sdkNetwork: string;
+  } | null>(null);
   const contract = useWalletContract(address);
   const generation = useRef(0);
   const latestRefresh = useRef(0);
@@ -125,6 +137,23 @@ export function useRoundSession(active: UseCase) {
   useEffect(() => {
     setEntryValue(active.defaultValue);
   }, [active.id, active.defaultValue]);
+
+  /**
+   * Refuse an on-chain action when the wallet's detected chain passphrase no
+   * longer matches the SDK client's configured network. Runs immediately
+   * before commit, reveal, and settle so a wallet switch cannot submit into the
+   * wrong network.
+   */
+  async function guardNetwork(action: DemoActionName) {
+    if (!contract) return;
+    const chainPassphrase = await detectChainNetworkPassphrase();
+    assertDemoNetworkMatch({
+      action,
+      chainPassphrase,
+      sdkPassphrase: sdkClientNetworkPassphrase(contract),
+    });
+    setNetworkMismatch(null);
+  }
 
   function updateSession(id: UseCaseId, patch: Partial<CaseSession>) {
     if ("roundId" in patch) {
@@ -184,8 +213,14 @@ export function useRoundSession(active: UseCase) {
       const addr = await resolveFreighterAddress(access);
       setAddress(addr);
       const net = await getNetworkDetails();
-      const netMsg =
-        net.networkPassphrase === NETWORK
+      const mismatch = demoNetworkMismatch({
+        chainPassphrase: net.networkPassphrase,
+        sdkPassphrase: sdkClientNetworkPassphrase(contract),
+      });
+      setNetworkMismatch(mismatch);
+      const netMsg = mismatch
+        ? `Connected — wallet is on ${mismatch.chainNetwork}, but this demo submits to ${mismatch.sdkNetwork}. Switch networks and reconnect.`
+        : net.networkPassphrase === NETWORK
           ? `Connected on ${net.network}.`
           : `Connected — switch Freighter to Testnet (current: ${net.network}).`;
       setWalletStatus(netMsg);
@@ -321,6 +356,7 @@ export function useRoundSession(active: UseCase) {
     const workingId = toast.push("working", "Sealing your entry…", `${active.inputLabel}: ${displayed}`);
     setStatus("working");
     try {
+      await guardNetwork("commit");
       const roundTx = await contract.get_round({ round_id: roundId });
       const round = roundTx.result.unwrap();
       const roundAuditorPublicKey = new Uint8Array(round.auditor_pubkey);
@@ -355,6 +391,9 @@ export function useRoundSession(active: UseCase) {
       toast.push("success", "Entry sealed on-chain", msg);
       await refresh(roundId, id);
     } catch (error) {
+      if (error instanceof DemoNetworkMismatchError) {
+        setNetworkMismatch({ chainNetwork: error.chainNetwork, sdkNetwork: error.sdkNetwork });
+      }
       const msg = displayError(error);
       setStatus("error");
       push(msg, id);
@@ -378,6 +417,7 @@ export function useRoundSession(active: UseCase) {
     setStatus("working");
     setRevealProgress(null);
     try {
+      await guardNetwork("reveal");
       const drand = quicknet();
       const roundTx = await contract.get_round({ round_id: roundId });
       let round = roundTx.result.unwrap();
@@ -467,6 +507,9 @@ export function useRoundSession(active: UseCase) {
       await refresh(roundId, id);
     } catch (error) {
       setRevealProgress(null);
+      if (error instanceof DemoNetworkMismatchError) {
+        setNetworkMismatch({ chainNetwork: error.chainNetwork, sdkNetwork: error.sdkNetwork });
+      }
       const msg = displayError(error);
       setStatus("error");
       push(msg, id);
@@ -487,6 +530,7 @@ export function useRoundSession(active: UseCase) {
     drandGate,
     commitSecondsRemaining,
     commitClosed,
+    networkMismatch,
     revealedCount,
     committed,
     commitValue,

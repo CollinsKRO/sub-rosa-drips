@@ -43,6 +43,10 @@ export type {
 } from "./errors.js";
 export {
   validateContractNetwork,
+  networkDisplayName,
+  networkPassphrasesMatch,
+  describeNetworkPassphraseMismatch,
+  SubRosaNetworkPassphraseMismatchError,
   type ContractNetworkValidationConfig,
   type NetworkValidationServer,
 } from "./network.js";

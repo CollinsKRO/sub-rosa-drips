@@ -18,11 +18,21 @@ import {
   sealBid,
   openBid,
 } from "@sub-rosa/tlock";
-
 import type { AttackStep, CapDemoResult } from "./demoTypes";
 import { systemClock } from "@sub-rosa/time";
 
 export type { AttackStep, CapDemoResult };
+
+// Demo actions must never submit a commit/reveal/settle into the wrong
+// network. Re-export the guard so demo flows share one implementation.
+export {
+  assertDemoNetworkMatch,
+  demoNetworkMismatch,
+  DemoNetworkMismatchError,
+  type DemoActionName,
+  type DemoNetworkCheck,
+} from "./network-guard";
+
 export function runCapSafetyDemos(): CapDemoResult[] {
   const results: CapDemoResult[] = [];
   const principal = Keypair.random();

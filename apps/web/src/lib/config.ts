@@ -4,6 +4,29 @@ export interface ConfigIssue {
   message: string;
 }
 
+/** Fallback passphrase for local/testnet demos when no env override is set. */
+export const DEFAULT_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
+
+/**
+ * Safe accessor for the Vite public env. Returns an empty object outside Vite
+ * (for example under `node --test`), so modules that read config at import
+ * time stay importable.
+ */
+export function publicEnv(): Record<string, string | undefined> {
+  return import.meta.env ?? {};
+}
+
+/**
+ * The passphrase the app (and the SDK client it builds) is configured for.
+ * Single source of truth so the chain helper and config validation cannot
+ * drift from each other.
+ */
+export function configuredNetworkPassphrase(
+  env: Record<string, string | undefined> = publicEnv(),
+): string {
+  return env.VITE_NETWORK_PASSPHRASE?.trim() || DEFAULT_NETWORK_PASSPHRASE;
+}
+
 const CRITICAL_KEYS = [
   "VITE_RPC_URL",
   "VITE_NETWORK_PASSPHRASE",
@@ -21,7 +44,7 @@ export function normalizeUrl(url: string): string {
 
 const PLACEHOLDER_VALUES: Record<string, string[]> = {
   VITE_RPC_URL: ["https://soroban-testnet.stellar.org"],
-  VITE_NETWORK_PASSPHRASE: ["Test SDF Network ; September 2015"],
+  VITE_NETWORK_PASSPHRASE: [DEFAULT_NETWORK_PASSPHRASE],
   VITE_CONTRACT_ID: [
     "CC2QMOXZERI6UOR67YKSORT7QTUHQ5QUGMHQBYVP23YM3NMUNNOEOGZY",
     "CAPTODBCDEVIK23ALBJBS2TXRTIK47ZA5MBTHYF4XLHG2BK7JPYUCU2Y",
