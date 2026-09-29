@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { QUICKNET_HASH } from "./quicknet.js";
+import { QUICKNET_HASH, assertQuicknetFixture } from "./quicknet.js";
 import { classifyDrandRound } from "./freshness.js";
 
 const QUICKNET_FIXTURE = {
@@ -90,4 +90,9 @@ test("freshness helper uses fixture fields to compute round timing", () => {
   const after = classifyDrandRound(round, { genesis_time, period }, publishAtMs + 60_001);
   assert.equal(after.status, "stale");
   assert.ok(after.ageMs! >= 60_001);
+});
+
+test("a mutated period fails the fixture comparison", () => {
+  const mutated = { ...QUICKNET_FIXTURE, period: 4 };
+  assert.throws(() => assertQuicknetFixture(mutated), /period mismatch/);
 });
