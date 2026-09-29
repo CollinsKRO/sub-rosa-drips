@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Sub Rosa contributors
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import type { RoundStatus } from "@sub-rosa/sdk";
 import { AgentActivity, KeeperPanel, X402Logs } from "../components/AgentPanels";
 import { AttackDemo } from "../components/AttackDemo";
 import { AuditorView } from "../components/AuditorView";
@@ -767,7 +768,7 @@ function EvidencePanel() {
         demo, agents, and auditor tools.
       </p>
       <MainnetProofCard />
-      <LifecycleView trace={DEMO_TRACE} />
+      <LifecycleView status={DEMO_TRACE.meta.roundStatus as RoundStatus} />
       <AttackDemo />
       <SettlementRail trace={DEMO_TRACE} />
       <AgentActivity trace={DEMO_TRACE} />
