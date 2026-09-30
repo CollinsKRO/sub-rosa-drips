@@ -29,12 +29,39 @@ export {
   buildKeeperDryRunSummary,
   decideKeeperDryRunAction,
   parseKeeperRunConfig,
+  planDryRunCheckpoint,
+  DRY_RUN_PHASE_STEP,
+  type KeeperDryRunCheckpoint,
   type KeeperDryRunDecision,
+  type KeeperDryRunOptions,
   type KeeperDryRunPhase,
   type KeeperDryRunReader,
   type KeeperDryRunSummary,
   type KeeperRunConfig,
 } from "./dry-run.js";
+export {
+  checkpointBindingMismatch,
+  checkpointHasStep,
+  planCheckpointRollback,
+  planCheckpointStep,
+  readCheckpointFile,
+  CHECKPOINT_SKIP_STEPS,
+  CHECKPOINT_VERSION,
+  DEFAULT_CHECKPOINT_PATH,
+  KeeperCheckpointError,
+  KeeperCheckpointMismatchError,
+  KeeperCheckpointStore,
+  STEP_SATISFIED_BY_STATUS,
+  type CheckpointVerification,
+  type KeeperCheckpoint,
+  type KeeperCheckpointFile,
+  type KeeperCheckpointStoreOptions,
+  type KeeperStep,
+  type ResumableCheckpoint,
+  type TransactionHashStatus,
+  type TransactionHashVerifier,
+  type WatchCheckpoint,
+} from "./checkpoint.js";
 export {
   createStatusServer,
   withGracefulShutdown,
@@ -55,4 +82,9 @@ export {
   type KeeperServiceHealth,
   type KeeperStatusResponse,
 } from "./status.js";
-export { runWatchLoop, type RunWatchLoopParams } from "./watch-loop.js";
+export {
+  resumeCheckpoint,
+  runWatchLoop,
+  type ResumeCheckpointParams,
+  type RunWatchLoopParams,
+} from "./watch-loop.js";

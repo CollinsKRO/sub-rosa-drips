@@ -24,6 +24,10 @@ import {
 import type { SettlementGuard } from "./settlement-guard.js";
 import type { KeeperLogger } from "./keeper.js";
 import { KeeperStore } from "./store.js";
+import type {
+  ResumableCheckpoint,
+  TransactionHashVerifier,
+} from "./checkpoint.js";
 
 export interface RunWatchLoopParams {
   sdk: SubRosaClient;
@@ -35,6 +39,10 @@ export interface RunWatchLoopParams {
   store: KeeperStore;
   settlementGuard: SettlementGuard;
   isStopping: () => boolean;
+  /** Durable watch cursor. When omitted the loop still runs, just without a cursor. */
+  checkpoint?: ResumableCheckpoint;
+  /** Optional transaction-hash lookup used to confirm recorded cursor steps. */
+  verifyTransaction?: TransactionHashVerifier;
   /** Injectable wall clock and scheduler. Default: systemTime. */
   time?: PartialTimeContext;
 }
@@ -63,6 +71,57 @@ async function resolveRoundIds(reader: SubRosaClient): Promise<bigint[]> {
   });
 }
 
+export interface ResumeCheckpointParams {
+  checkpoint?: ResumableCheckpoint;
+  sdk: Pick<SubRosaClient, "getRound">;
+  log: KeeperLogger;
+  verifyTransaction?: TransactionHashVerifier;
+}
+
+/**
+ * Startup resume gate for the watch cursor.
+ *
+ * 1. Re-check every recorded transaction hash. A hash that is not `confirmed`
+ *    is rolled back so the step is retried.
+ * 2. Reconcile the remaining (hashless) cursor entries against the on-chain
+ *    status. If the chain cannot prove a step happened, drop it rather than
+ *    stranding the round.
+ */
+export async function resumeCheckpoint(
+  params: ResumeCheckpointParams,
+): Promise<void> {
+  const { checkpoint, sdk, log, verifyTransaction } = params;
+  if (!checkpoint) return;
+
+  for (const verification of await checkpoint.verifyHashes(verifyTransaction)) {
+    log(
+      `checkpoint ${verification.retained ? "confirmed" : "rolled back"} ` +
+        `${verification.step} for round ${verification.roundId} ` +
+        `(tx ${verification.transactionHash}: ${verification.status})`,
+    );
+  }
+
+  for (const roundId of checkpoint.listRoundIds()) {
+    let status: string;
+    try {
+      status = (await sdk.getRound(roundId)).status.tag;
+    } catch (e) {
+      // An unreadable round is not proof of anything — keep the cursor and retry
+      // reconciliation on the next tick.
+      log(
+        `checkpoint: could not read round ${roundId} to reconcile: ${normalizeError(e).message}`,
+      );
+      continue;
+    }
+    const dropped = checkpoint.reconcile(roundId, status);
+    if (dropped.length > 0) {
+      log(
+        `checkpoint: round ${roundId} is ${status}; retrying ${dropped.join(", ")}`,
+      );
+    }
+  }
+}
+
 export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
   const {
     sdk,
@@ -74,12 +133,16 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
     store,
     settlementGuard,
     isStopping,
+    checkpoint,
+    verifyTransaction,
     time,
   } = params;
 
   const resolvedTime = resolveTimeContext(systemTime, time);
   const { clock, scheduler } = resolvedTime;
-  const deps: KeeperDeps = { sdk, drand, log, time: resolvedTime };
+  const deps: KeeperDeps = { sdk, drand, log, time: resolvedTime, checkpoint };
+
+  await resumeCheckpoint({ checkpoint, sdk, log, verifyTransaction });
 
   while (!isStopping()) {
     const started = clock.nowMs();

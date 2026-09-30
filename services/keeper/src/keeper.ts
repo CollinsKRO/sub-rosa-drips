@@ -20,6 +20,11 @@ import type { SubRosaClient } from "@sub-rosa/sdk";
 import { openBid, fetchRoundSignature, type DrandClient } from "@sub-rosa/tlock";
 import { compareRoundIds } from "./store.js";
 import {
+  CHECKPOINT_SKIP_STEPS,
+  type KeeperStep,
+  type WatchCheckpoint,
+} from "./checkpoint.js";
+import {
   resolveTimeContext,
   systemTime,
   type PartialTimeContext,
@@ -39,6 +44,11 @@ export interface KeeperDeps {
   pollMs?: number;
   /** Injectable wall clock and scheduler. Default: systemTime. */
   time?: PartialTimeContext;
+  /**
+   * Durable watch cursor. When present, steps it records as complete are not
+   * re-broadcast — that is what stops a restart from resettling a round.
+   */
+  checkpoint?: WatchCheckpoint;
 }
 
 export interface SkipRecord {
@@ -59,6 +69,9 @@ export interface KeeperResult {
 const IDEMPOTENT_OPEN = ["RevealAlreadyOpen", "WrongStatus", "AlreadyCleared"];
 const IDEMPOTENT_REVEAL = ["AlreadyRevealed"];
 
+/** Skip reasons that still mean "this bid is revealed on chain". */
+const REVEALED_REASONS = new Set(["already revealed", "already revealed (race)"]);
+
 export function errorName(e: unknown): string {
   return normalizeError(e).message;
 }
@@ -70,6 +83,30 @@ export function errorMatches(e: unknown, names: string[]): boolean {
 
 function keeperTime(deps: KeeperDeps): TimeContext {
   return resolveTimeContext(systemTime, deps.time);
+}
+
+/**
+ * True when the durable checkpoint says this step already completed and must not
+ * be broadcast again. Only skip-eligible steps qualify: `open-reveal` is derived
+ * from the on-chain status, so trusting the cursor there could strand a round.
+ */
+function stepAlreadyDone(
+  deps: KeeperDeps,
+  roundId: bigint,
+  step: KeeperStep,
+): boolean {
+  if (!deps.checkpoint || !CHECKPOINT_SKIP_STEPS.includes(step)) return false;
+  return deps.checkpoint.isComplete(roundId, step);
+}
+
+/** Record a completed step in the durable cursor (no-op without a checkpoint). */
+function recordStep(
+  deps: KeeperDeps,
+  roundId: bigint,
+  step: KeeperStep,
+  transactionHash?: string | null,
+): void {
+  deps.checkpoint?.markComplete(roundId, step, transactionHash);
 }
 
 /** Wait until Drand round R should be published. Returns false if R is still in
@@ -151,65 +188,83 @@ export async function keepRound(
         throw e;
       }
     }
+    // The reveal window is open from here on (we opened it, or the contract told
+    // us it already was) — advance the cursor before revealing any bid.
+    recordStep(deps, rid, "open-reveal");
     round = await sdk.getRound(rid);
   }
 
   // ── Phase B: decrypt every seal and reveal it ─────────────────────────
   if (round.status.tag === "Revealing") {
-    const bidders: string[] = [];
-    for await (const addr of sdk.bidders(rid)) bidders.push(addr);
-    log(`revealing ${bidders.length} bidder(s)`);
+    if (stepAlreadyDone(deps, rid, "reveal")) {
+      // A previous process already revealed every bid and recorded it. Re-decrypting
+      // and re-broadcasting would be pure waste, so trust the cursor.
+      log(`reveals skipped: checkpoint records every bid revealed`);
+      result.skipped.push({ bidder: "*", reason: "reveals complete (checkpoint)" });
+    } else {
+      const bidders: string[] = [];
+      for await (const addr of sdk.bidders(rid)) bidders.push(addr);
+      log(`revealing ${bidders.length} bidder(s)`);
 
-    for (const bidder of bidders) {
-      let state;
-      try {
-        state = await sdk.getBidState(rid, bidder);
-      } catch (e) {
-        result.skipped.push({ bidder, reason: `state read failed: ${errorName(e)}` });
-        continue;
-      }
-      // Option<i128> None decodes as null/undefined; a revealed bid is a bigint.
-      if (state.revealed_value != null) {
-        result.skipped.push({ bidder, reason: "already revealed" });
-        continue;
-      }
-
-      const seal = await sdk.getSeal(rid, bidder);
-      if (!seal) {
-        result.skipped.push({ bidder, reason: "seal expired/absent" });
-        continue;
-      }
-
-      let opened;
-      try {
-        opened = await openBid(new Uint8Array(seal.ciphertext), drand);
-      } catch (e) {
-        result.skipped.push({ bidder, reason: `decrypt failed: ${errorName(e)}` });
-        continue;
-      }
-
-      try {
-        await sdk.reveal({
-          roundId: rid,
-          bidder,
-          value: opened.value,
-          nonce: opened.nonce,
-        });
-        result.revealed.push(bidder);
-        log(`revealed ${bidder} = ${opened.value}`);
-      } catch (e) {
-        if (errorMatches(e, IDEMPOTENT_REVEAL)) {
-          result.skipped.push({ bidder, reason: "already revealed (race)" });
-        } else if (errorMatches(e, ["HashMismatch"])) {
-          // A reveal that does not hash to H is rejected by the contract; the
-          // canonical value is whatever we decrypted, so this only happens for a
-          // corrupt seal — record and move on.
-          result.skipped.push({ bidder, reason: "hash mismatch (corrupt seal)" });
-        } else if (errorMatches(e, ["RevealWindowClosed"])) {
-          result.skipped.push({ bidder, reason: "reveal window closed" });
-        } else {
-          throw e;
+      for (const bidder of bidders) {
+        let state;
+        try {
+          state = await sdk.getBidState(rid, bidder);
+        } catch (e) {
+          result.skipped.push({ bidder, reason: `state read failed: ${errorName(e)}` });
+          continue;
         }
+        // Option<i128> None decodes as null/undefined; a revealed bid is a bigint.
+        if (state.revealed_value != null) {
+          result.skipped.push({ bidder, reason: "already revealed" });
+          continue;
+        }
+
+        const seal = await sdk.getSeal(rid, bidder);
+        if (!seal) {
+          result.skipped.push({ bidder, reason: "seal expired/absent" });
+          continue;
+        }
+
+        let opened;
+        try {
+          opened = await openBid(new Uint8Array(seal.ciphertext), drand);
+        } catch (e) {
+          result.skipped.push({ bidder, reason: `decrypt failed: ${errorName(e)}` });
+          continue;
+        }
+
+        try {
+          await sdk.reveal({
+            roundId: rid,
+            bidder,
+            value: opened.value,
+            nonce: opened.nonce,
+          });
+          result.revealed.push(bidder);
+          log(`revealed ${bidder} = ${opened.value}`);
+        } catch (e) {
+          if (errorMatches(e, IDEMPOTENT_REVEAL)) {
+            result.skipped.push({ bidder, reason: "already revealed (race)" });
+          } else if (errorMatches(e, ["HashMismatch"])) {
+            // A reveal that does not hash to H is rejected by the contract; the
+            // canonical value is whatever we decrypted, so this only happens for a
+            // corrupt seal — record and move on.
+            result.skipped.push({ bidder, reason: "hash mismatch (corrupt seal)" });
+          } else if (errorMatches(e, ["RevealWindowClosed"])) {
+            result.skipped.push({ bidder, reason: "reveal window closed" });
+          } else {
+            throw e;
+          }
+        }
+      }
+
+      // Only advance the cursor when every bidder ended up revealed. A seal we
+      // could not decrypt, or a window that closed mid-pass, must stay retryable.
+      if (result.skipped.every((s) => REVEALED_REASONS.has(s.reason))) {
+        recordStep(deps, rid, "reveal");
+      } else {
+        log(`reveals incomplete; cursor left before the reveal step`);
       }
     }
     round = await sdk.getRound(rid);
@@ -256,27 +311,38 @@ export async function closeRound(
 
   // ── Phase C: clear once the reveal window has closed ──────────────────
   if (round.status.tag === "Revealing") {
-    const now = clock.nowSeconds();
-    if (now <= Number(round.reveal_deadline)) {
-      result.skipped.push(`reveal window open until ${round.reveal_deadline}`);
-      result.finalStatus = round.status.tag;
-      return result;
-    }
-    try {
-      const winner = await sdk.clear(rid);
-      result.cleared = true;
-      result.winner = winner;
-      if (winner === undefined) {
-        result.voided = true;
-        log(`cleared → no valid bids; round voided + refunded`);
-      } else {
-        log(`cleared → winner ${winner}`);
+    if (stepAlreadyDone(deps, rid, "clear")) {
+      // The cursor says a previous process cleared this round. Do not re-broadcast
+      // clear: the winner is already fixed and the escrow is already committed.
+      log(`clear skipped: checkpoint records the round as cleared`);
+      result.skipped.push("clear already complete (checkpoint)");
+    } else {
+      const now = clock.nowSeconds();
+      if (now <= Number(round.reveal_deadline)) {
+        result.skipped.push(`reveal window open until ${round.reveal_deadline}`);
+        result.finalStatus = round.status.tag;
+        return result;
       }
-    } catch (e) {
-      if (errorMatches(e, ["AlreadyCleared", "RevealStillOpen", "WrongStatus", "RoundVoided"])) {
-        result.skipped.push(`clear skipped: ${errorName(e)}`);
-      } else {
-        throw e;
+      try {
+        const winner = await sdk.clear(rid);
+        result.cleared = true;
+        result.winner = winner;
+        if (winner === undefined) {
+          result.voided = true;
+          log(`cleared → no valid bids; round voided + refunded`);
+        } else {
+          log(`cleared → winner ${winner}`);
+        }
+        recordStep(deps, rid, "clear");
+      } catch (e) {
+        if (errorMatches(e, ["AlreadyCleared", "RevealStillOpen", "WrongStatus", "RoundVoided"])) {
+          result.skipped.push(`clear skipped: ${errorName(e)}`);
+          if (errorMatches(e, ["AlreadyCleared"])) {
+            recordStep(deps, rid, "clear");
+          }
+        } else {
+          throw e;
+        }
       }
     }
     round = await sdk.getRound(rid);
@@ -284,15 +350,28 @@ export async function closeRound(
 
   // ── Phase D: settle a cleared round (real SAC transfers) ──────────────
   if (round.status.tag === "Cleared") {
-    try {
-      await sdk.settle(rid);
-      result.settled = true;
-      log(`settled round ${rid}`);
-    } catch (e) {
-      if (errorMatches(e, ["AlreadySettled", "NotCleared", "WrongStatus"])) {
-        result.skipped.push(`settle skipped: ${errorName(e)}`);
-      } else {
-        throw e;
+    if (stepAlreadyDone(deps, rid, "settle")) {
+      // This is the whole point of the cursor: a restart after a confirmed
+      // settle must not pay the escrow out a second time.
+      log(`settle skipped: checkpoint records the round as settled`);
+      result.skipped.push("settle already complete (checkpoint)");
+    } else {
+      try {
+        await sdk.settle(rid);
+        result.settled = true;
+        log(`settled round ${rid}`);
+        recordStep(deps, rid, "settle");
+      } catch (e) {
+        if (errorMatches(e, ["AlreadySettled", "NotCleared", "WrongStatus"])) {
+          result.skipped.push(`settle skipped: ${errorName(e)}`);
+          // The contract telling us it is already settled is proof the step landed —
+          // record it so the next restart does not broadcast it again.
+          if (errorMatches(e, ["AlreadySettled"])) {
+            recordStep(deps, rid, "settle");
+          }
+        } else {
+          throw e;
+        }
       }
     }
     round = await sdk.getRound(rid);
@@ -341,6 +420,13 @@ export async function voidIfStale(
     return result;
   }
 
+  if (stepAlreadyDone(deps, rid, "void")) {
+    log(`void skipped: checkpoint records the round as voided`);
+    result.skipped.push("void already complete (checkpoint)");
+    result.finalStatus = round.status.tag;
+    return result;
+  }
+
   const now = clock.nowSeconds();
   const voidAfter = Number(round.reveal_deadline) + VOID_GRACE_SECONDS;
   if (now <= voidAfter) {
@@ -353,6 +439,7 @@ export async function voidIfStale(
     await sdk.void(rid);
     result.voided = true;
     log(`voided round ${rid} (Drand liveness / grace elapsed)`);
+    recordStep(deps, rid, "void");
   } catch (e) {
     if (errorMatches(e, ["NotVoidable", "WrongStatus", "AlreadyCleared"])) {
       result.skipped.push(errorName(e));
