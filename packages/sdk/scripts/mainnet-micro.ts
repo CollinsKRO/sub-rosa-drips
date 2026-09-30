@@ -157,6 +157,7 @@ async function main() {
     value: bid,
     nonce,
     round: revealRound,
+    revealRound,
     client: drand,
     identity: new TextEncoder().encode(`micro:${bidderKp.publicKey()}`),
     auditorPublicKey: auditor.publicKey,

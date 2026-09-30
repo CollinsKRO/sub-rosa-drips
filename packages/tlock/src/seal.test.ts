@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { quicknet, currentRound } from "./quicknet.js";
 import { sealBid, openBid, generateNonce } from "./seal.js";
 import { commitment, toHex } from "./commitment.js";
+import { SealRoundError } from "./window.js";
 import { generateAuditorKeypair, openIdentity } from "./auditor.js";
 import { openPayload, payloadCommitment, sealPayload } from "./payload.js";
 
@@ -28,6 +29,7 @@ test(
       value,
       nonce,
       round,
+      revealRound: round,
       client,
       identity,
       auditorPublicKey: auditor.publicKey,
@@ -68,6 +70,7 @@ test(
       nonce,
       payload,
       round,
+      revealRound: round,
       client,
       identity,
       auditorPublicKey: auditor.publicKey,
@@ -91,7 +94,7 @@ test(
     const round = (await currentRound(client)) - 5;
     const value = 555n;
     const nonce = generateNonce();
-    const sealed = await sealBid({ value, nonce, round, client });
+    const sealed = await sealBid({ value, nonce, round, revealRound: round, client });
     const opened = await openBid(sealed.ciphertext, client);
 
     const wrongNonce = new Uint8Array(32).fill(0x42);
@@ -104,7 +107,7 @@ test("sealBid rejects a non-positive Drand round", async () => {
   const client = quicknet();
   for (const round of [0, -1, -100]) {
     await assert.rejects(
-      sealBid({ value: 1n, nonce: generateNonce(), round, client }),
+      sealBid({ value: 1n, nonce: generateNonce(), round, revealRound: round, client }),
       /round must be a positive integer/,
     );
   }
@@ -129,6 +132,7 @@ test(
       value: 999n,
       nonce: generateNonce(),
       round: futureRound,
+      revealRound: futureRound,
       client,
     });
     await assert.rejects(openBid(sealed.ciphertext, client));
@@ -141,19 +145,19 @@ test("sealBid rejects non-positive or non-integer round numbers", async () => {
   const value = 100n;
 
   await assert.rejects(
-    () => sealBid({ value, nonce, round: 0, client }),
+    () => sealBid({ value, nonce, round: 0, revealRound: 0, client }),
     (err: any) => err instanceof RangeError && /round must be a positive integer/.test(err.message),
   );
   await assert.rejects(
-    () => sealBid({ value, nonce, round: -5, client }),
+    () => sealBid({ value, nonce, round: -5, revealRound: -5, client }),
     (err: any) => err instanceof RangeError && /round must be a positive integer/.test(err.message),
   );
   await assert.rejects(
-    () => sealBid({ value, nonce, round: 1.5, client }),
+    () => sealBid({ value, nonce, round: 1.5, revealRound: 1.5, client }),
     (err: any) => err instanceof RangeError && /round must be a positive integer/.test(err.message),
   );
   await assert.rejects(
-    () => sealBid({ value, nonce, round: NaN, client }),
+    () => sealBid({ value, nonce, round: NaN, revealRound: NaN, client }),
     (err: any) => err instanceof RangeError && /round must be a positive integer/.test(err.message),
   );
 });
@@ -164,15 +168,15 @@ test("sealBid rejects invalid nonce lengths", async () => {
   const round = 1000;
 
   await assert.rejects(
-    () => sealBid({ value, nonce: new Uint8Array(16), round, client }),
+    () => sealBid({ value, nonce: new Uint8Array(16), round, revealRound: round, client }),
     /nonce must be 32 bytes/,
   );
   await assert.rejects(
-    () => sealBid({ value, nonce: new Uint8Array(31), round, client }),
+    () => sealBid({ value, nonce: new Uint8Array(31), round, revealRound: round, client }),
     /nonce must be 32 bytes/,
   );
   await assert.rejects(
-    () => sealBid({ value, nonce: new Uint8Array(33), round, client }),
+    () => sealBid({ value, nonce: new Uint8Array(33), round, revealRound: round, client }),
     /nonce must be 32 bytes/,
   );
 });
@@ -183,5 +187,79 @@ test("openBid rejects empty ciphertext", async () => {
     () => openBid(new Uint8Array(0), client),
     /ciphertext is empty/,
   );
+});
+
+// ── Issue #376: seal-round commit window ────────────────────────────────────
+
+test("sealBid rejects a seal whose round is earlier than the auction's round", async () => {
+  const client = quicknet();
+  // Quicknet genesis (2023-08-23) + fixture math keeps this an honest, fully
+  // published historical round for both sides of the window check.
+  const revealRound = 10_000_000;
+  await assert.rejects(
+    sealBid({
+      value: 100n,
+      nonce: generateNonce(),
+      round: revealRound - 1,
+      revealRound,
+      client,
+    }),
+    (err: unknown) =>
+      err instanceof SealRoundError &&
+      err.reason === "seal-round-too-early" &&
+      err.revealRound === revealRound,
+  );
+});
+
+test("sealBid rejects a seal whose round is later than the auction's round", async () => {
+  const client = quicknet();
+  const revealRound = 10_000_000;
+  await assert.rejects(
+    sealBid({
+      value: 100n,
+      nonce: generateNonce(),
+      round: revealRound + 1,
+      revealRound,
+      client,
+    }),
+    (err: unknown) =>
+      err instanceof SealRoundError && err.reason === "seal-round-too-late",
+  );
+});
+
+test("sealBid rejects malformed seal rounds before any network call", async () => {
+  const client = quicknet();
+  const revealRound = 10_000_000;
+  for (const round of [0, -3, 1.5, NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(
+      sealBid({
+        value: 100n,
+        nonce: generateNonce(),
+        round,
+        revealRound,
+        client,
+      }),
+      (err: unknown) =>
+        // Legacy input guard (RangeError) or the stable window error — both
+        // reject before any escrow lock. The helper's stable errors are
+        // covered exhaustively in window.test.ts.
+        err instanceof RangeError ||
+        (err instanceof SealRoundError && err.reason === "invalid-seal-round-zero"),
+    );
+  }
+});
+
+test("a bid sealed exactly at the auction's round passes the window check", { timeout: NET_TIMEOUT }, async () => {
+  const client = quicknet();
+  const round = (await currentRound(client)) - 5;
+  const sealed = await sealBid({
+    value: 7n,
+    nonce: generateNonce(),
+    round,
+    revealRound: round,
+    client,
+  });
+  const opened = await openBid(sealed.ciphertext, client);
+  assert.equal(opened.value, 7n);
 });
 

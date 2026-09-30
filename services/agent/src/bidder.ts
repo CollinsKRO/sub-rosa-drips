@@ -161,6 +161,7 @@ export async function runBidderAgent(config: BidderAgentConfig, dependencies: Bi
     value: bidValue,
     nonce,
     round: revealRound,
+    revealRound,
     client: drand,
     identity: new TextEncoder().encode(`agent:${sessionKp.publicKey()}`),
     auditorPublicKey,

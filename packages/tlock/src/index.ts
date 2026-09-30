@@ -59,6 +59,13 @@ export {
 } from "./freshness.js";
 
 export {
+  assertSealRoundWindow,
+  isMalformedRound,
+  SealRoundError,
+  type SealRoundErrorReason,
+} from "./window.js";
+
+export {
   encodePayloadEnvelope,
   decodePayloadEnvelope,
   payloadCommitment,

@@ -16,6 +16,7 @@ import { timelockDecrypt, timelockEncrypt, Buffer as TlockBuffer } from "tlock-j
 import { sealIdentity } from "./auditor.js";
 import { beBytesToI128, i128ToBeBytes, NONCE_BYTES, VALUE_BYTES } from "./commitment.js";
 import type { DrandClient } from "./quicknet.js";
+import { assertSealRoundWindow } from "./window.js";
 
 const utf8Encode = new TextEncoder();
 const utf8Decode = new TextDecoder();
@@ -47,6 +48,9 @@ export interface PayloadEnvelope {
 
 export interface SealPayloadParams extends PayloadEnvelope {
   round: number;
+  /// The Drand round the auction committed to open (`Round::reveal_round`).
+  /// The seal must name exactly this round, or sealing is rejected.
+  revealRound: number;
   client: DrandClient;
   identity?: Uint8Array;
   auditorPublicKey?: Uint8Array;
@@ -149,6 +153,7 @@ export function payloadCommitment(envelope: PayloadEnvelope): Uint8Array {
 export async function sealPayload(params: SealPayloadParams): Promise<SealedPayload> {
   const {
     round,
+    revealRound,
     client,
     identity,
     auditorPublicKey,
@@ -156,6 +161,9 @@ export async function sealPayload(params: SealPayloadParams): Promise<SealedPayl
     nonce,
     payload,
   } = params;
+  // Issue #376: the seal must name exactly the round the auction committed to
+  // open — same rule the contract enforces inside `commit`.
+  assertSealRoundWindow(round, revealRound);
   const envelope: PayloadEnvelope = {
     ...(amount === undefined ? {} : { amount }),
     nonce,

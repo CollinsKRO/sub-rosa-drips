@@ -181,6 +181,7 @@ fn commitment(env: &Env, value: i128, nonce: &BytesN<32>) -> BytesN<32> {
 fn commit_bid(f: &Fixture, round_id: u64, bidder: &Address, value: i128, escrow: i128, nonce_byte: u8) -> BytesN<32> {
     let nonce = b32(&f.env, nonce_byte);
     let h = commitment(&f.env, value, &nonce);
+    let round = f.client.get_round(&round_id);
     f.client.commit(
         &round_id,
         bidder,
@@ -188,6 +189,7 @@ fn commit_bid(f: &Fixture, round_id: u64, bidder: &Address, value: i128, escrow:
         &Bytes::from_array(&f.env, b"sealed"),
         &escrow,
         &Bytes::from_array(&f.env, b"id-blob"),
+        &round.reveal_round,
     );
     nonce
 }
@@ -310,13 +312,27 @@ fn create_round_rejects_deadline_in_past() {
     assert!(res.is_err());
 }
 
+/// Issue #376: a reveal round the quicknet chain can never publish — genesis +
+/// period×R overflows u64 — must fail create_round instead of saturating into
+/// a far-future deadline that would strand the round past the void window.
+#[test]
+fn create_round_rejects_overflowing_reveal_round() {
+    let f = setup();
+    let operator = Address::generate(&f.env);
+    let res = f.client.try_create_round(
+        &operator, &b32(&f.env, 1), &u64::MAX, &ClearingRule::HighestBid,
+        &1_500, &2_500, &Bytes::from_array(&f.env, b"a"),
+    );
+    assert!(res.is_err());
+}
+
 #[test]
 fn commit_locks_escrow() {
     let f = setup();
     let operator = Address::generate(&f.env);
     let id = open_round(&f, &operator);
     let bidder = funded_bidder(&f, 1_000);
-    f.client.commit(&id, &bidder, &b32(&f.env, 7), &Bytes::from_array(&f.env, b"ciphertext"), &600, &Bytes::from_array(&f.env, b"id-blob"));
+    f.client.commit(&id, &bidder, &b32(&f.env, 7), &Bytes::from_array(&f.env, b"ciphertext"), &600, &Bytes::from_array(&f.env, b"id-blob"), &2_000);
     assert_eq!(f.usdc_token.balance(&bidder), 400);
     assert_eq!(f.usdc_token.balance(&f.client.address), 600);
     let round = f.client.get_round(&id);
@@ -333,9 +349,9 @@ fn get_bidders_returns_ordered_index() {
     let id = open_round(&f, &operator);
     let a = funded_bidder(&f, 1_000);
     let b = funded_bidder(&f, 1_000);
-    f.client.commit(&id, &a, &b32(&f.env, 1), &Bytes::from_array(&f.env, b"c"), &100, &Bytes::from_array(&f.env, b"id"));
-    f.client.commit(&id, &b, &b32(&f.env, 2), &Bytes::from_array(&f.env, b"c"), &200, &Bytes::from_array(&f.env, b"id"));
-    f.client.commit(&id, &a, &b32(&f.env, 3), &Bytes::from_array(&f.env, b"c"), &150, &Bytes::from_array(&f.env, b"id"));
+    f.client.commit(&id, &a, &b32(&f.env, 1), &Bytes::from_array(&f.env, b"c"), &100, &Bytes::from_array(&f.env, b"id"), &2_000);
+    f.client.commit(&id, &b, &b32(&f.env, 2), &Bytes::from_array(&f.env, b"c"), &200, &Bytes::from_array(&f.env, b"id"), &2_000);
+    f.client.commit(&id, &a, &b32(&f.env, 3), &Bytes::from_array(&f.env, b"c"), &150, &Bytes::from_array(&f.env, b"id"), &2_000);
     let bidders = f.client.get_bidders(&id);
     assert_eq!(bidders.len(), 2);
     assert_eq!(bidders.get(0).unwrap(), a);
@@ -348,8 +364,8 @@ fn commit_overwrite_before_close_refunds_prior_escrow() {
     let operator = Address::generate(&f.env);
     let id = open_round(&f, &operator);
     let bidder = funded_bidder(&f, 1_000);
-    f.client.commit(&id, &bidder, &b32(&f.env, 7), &Bytes::from_array(&f.env, b"c1"), &600, &Bytes::from_array(&f.env, b"id"));
-    f.client.commit(&id, &bidder, &b32(&f.env, 9), &Bytes::from_array(&f.env, b"c2"), &200, &Bytes::from_array(&f.env, b"id"));
+    f.client.commit(&id, &bidder, &b32(&f.env, 7), &Bytes::from_array(&f.env, b"c1"), &600, &Bytes::from_array(&f.env, b"id"), &2_000);
+    f.client.commit(&id, &bidder, &b32(&f.env, 9), &Bytes::from_array(&f.env, b"c2"), &200, &Bytes::from_array(&f.env, b"id"), &2_000);
     assert_eq!(f.usdc_token.balance(&bidder), 800);
     assert_eq!(f.usdc_token.balance(&f.client.address), 200);
     assert_eq!(f.client.get_round(&id).bidders.len(), 1);
@@ -362,7 +378,7 @@ fn commit_after_deadline_rejected() {
     let id = open_round(&f, &operator);
     let bidder = funded_bidder(&f, 1_000);
     f.env.ledger().with_mut(|l| l.timestamp = 1_600);
-    let res = f.client.try_commit(&id, &bidder, &b32(&f.env, 7), &Bytes::from_array(&f.env, b"c"), &600, &Bytes::from_array(&f.env, b"id"));
+    let res = f.client.try_commit(&id, &bidder, &b32(&f.env, 7), &Bytes::from_array(&f.env, b"c"), &600, &Bytes::from_array(&f.env, b"id"), &2_000);
     assert!(res.is_err());
 }
 
@@ -372,7 +388,7 @@ fn commit_zero_escrow_rejected() {
     let operator = Address::generate(&f.env);
     let id = open_round(&f, &operator);
     let bidder = funded_bidder(&f, 1_000);
-    let res = f.client.try_commit(&id, &bidder, &b32(&f.env, 7), &Bytes::from_array(&f.env, b"c"), &0, &Bytes::from_array(&f.env, b"id"));
+    let res = f.client.try_commit(&id, &bidder, &b32(&f.env, 7), &Bytes::from_array(&f.env, b"c"), &0, &Bytes::from_array(&f.env, b"id"), &2_000);
     assert!(res.is_err());
 }
 
@@ -383,8 +399,8 @@ fn void_after_grace_refunds_all() {
     let id = open_round(&f, &operator);
     let a = funded_bidder(&f, 1_000);
     let bbidder = funded_bidder(&f, 1_000);
-    f.client.commit(&id, &a, &b32(&f.env, 1), &Bytes::from_array(&f.env, b"c"), &300, &Bytes::from_array(&f.env, b"id"));
-    f.client.commit(&id, &bbidder, &b32(&f.env, 2), &Bytes::from_array(&f.env, b"c"), &500, &Bytes::from_array(&f.env, b"id"));
+    f.client.commit(&id, &a, &b32(&f.env, 1), &Bytes::from_array(&f.env, b"c"), &300, &Bytes::from_array(&f.env, b"id"), &2_000);
+    f.client.commit(&id, &bbidder, &b32(&f.env, 2), &Bytes::from_array(&f.env, b"c"), &500, &Bytes::from_array(&f.env, b"id"), &2_000);
     f.env.ledger().with_mut(|l| l.timestamp = 2_500 + 3_600 + 1);
     f.client.void(&id);
     assert_eq!(f.usdc_token.balance(&a), 1_000);
@@ -625,7 +641,7 @@ fn repeated_overwrites_escrow_conservation() {
     let initial: i128 = 2_000;
     let escrows: &[i128] = &[500, 300, 800, 100];
     for (i, &escrow) in escrows.iter().enumerate() {
-        f.client.commit(&id, &bidder, &b32(&f.env, (i + 1) as u8), &Bytes::from_array(&f.env, b"c"), &escrow, &Bytes::from_array(&f.env, b"id"));
+        f.client.commit(&id, &bidder, &b32(&f.env, (i + 1) as u8), &Bytes::from_array(&f.env, b"c"), &escrow, &Bytes::from_array(&f.env, b"id"), &2_000);
         let sum = f.usdc_token.balance(&bidder) + f.usdc_token.balance(&f.client.address);
         assert_eq!(sum, initial, "conservation violated after overwrite #{}", i + 1);
         assert_eq!(f.usdc_token.balance(&f.client.address), escrow, "contract must hold latest escrow after #{}", i + 1);
@@ -639,8 +655,8 @@ fn overwrite_to_larger_escrow_conserves_tokens() {
     let operator = Address::generate(&f.env);
     let id = open_round(&f, &operator);
     let bidder = funded_bidder(&f, 1_000);
-    f.client.commit(&id, &bidder, &b32(&f.env, 1), &Bytes::from_array(&f.env, b"c"), &200, &Bytes::from_array(&f.env, b"id"));
-    f.client.commit(&id, &bidder, &b32(&f.env, 2), &Bytes::from_array(&f.env, b"c"), &700, &Bytes::from_array(&f.env, b"id"));
+    f.client.commit(&id, &bidder, &b32(&f.env, 1), &Bytes::from_array(&f.env, b"c"), &200, &Bytes::from_array(&f.env, b"id"), &2_000);
+    f.client.commit(&id, &bidder, &b32(&f.env, 2), &Bytes::from_array(&f.env, b"c"), &700, &Bytes::from_array(&f.env, b"id"), &2_000);
     assert_eq!(f.usdc_token.balance(&bidder), 300);
     assert_eq!(f.usdc_token.balance(&f.client.address), 700);
     assert_eq!(f.usdc_token.balance(&bidder) + f.usdc_token.balance(&f.client.address), 1_000);
@@ -829,7 +845,7 @@ fn commit_on_settled_round_rejected() {
     f.client.settle(&id);
 
     let late = funded_bidder(&f, 1_000);
-    assert!(f.client.try_commit(&id, &late, &b32(&f.env, 0x77), &Bytes::from_array(&f.env, b"c"), &100, &Bytes::from_array(&f.env, b"id")).is_err(),
+    assert!(f.client.try_commit(&id, &late, &b32(&f.env, 0x77), &Bytes::from_array(&f.env, b"c"), &100, &Bytes::from_array(&f.env, b"id"), &2_000).is_err(),
         "commit on settled round must be rejected");
 }
 
@@ -1004,8 +1020,8 @@ fn full_lifecycle_real_drand_signature() {
     let a_value: i128 = 700;
     let b_value: i128 = 500;
 
-    f.client.commit(&id, &alice, &commitment(&f.env, a_value, &a_nonce), &Bytes::from_array(&f.env, b"sealedA"), &1_000, &Bytes::from_array(&f.env, b"idA"));
-    f.client.commit(&id, &bob,   &commitment(&f.env, b_value, &b_nonce), &Bytes::from_array(&f.env, b"sealedB"), &1_000, &Bytes::from_array(&f.env, b"idB"));
+    f.client.commit(&id, &alice, &commitment(&f.env, a_value, &a_nonce), &Bytes::from_array(&f.env, b"sealedA"), &1_000, &Bytes::from_array(&f.env, b"idA"), &VEC_ROUND);
+    f.client.commit(&id, &bob,   &commitment(&f.env, b_value, &b_nonce), &Bytes::from_array(&f.env, b"sealedB"), &1_000, &Bytes::from_array(&f.env, b"idB"), &VEC_ROUND);
 
     f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
     let sig = hexn::<96>(&f.env, VEC_SIG_G1);
@@ -1045,7 +1061,7 @@ fn round_with_n_bidders(n: u32) -> (Fixture, u64, Vec<Address>) {
     let mut all = Vec::new(&f.env);
     for i in 0..n {
         let bidder = funded_bidder(&f, 1_000 + i as i128);
-        f.client.commit(&id, &bidder, &b32(&f.env, (i + 1) as u8), &Bytes::from_array(&f.env, b"c"), &100, &Bytes::from_array(&f.env, b"id"));
+        f.client.commit(&id, &bidder, &b32(&f.env, (i + 1) as u8), &Bytes::from_array(&f.env, b"c"), &100, &Bytes::from_array(&f.env, b"id"), &2_000);
         all.push_back(bidder);
     }
     (f, id, all)
@@ -1401,6 +1417,10 @@ pub(super) const DOCUMENTED_ERROR_CODES: &[(Error, u32)] = &[
     (Error::NoValidBids, 37),
     (Error::RoundFull, 38),
     (Error::InvalidLimit, 39),
+    // ── 40–42: seal-round window (issue #376) ──
+    (Error::SealRoundTooEarly, 40),
+    (Error::SealRoundTooLate, 41),
+    (Error::InvalidSealRoundZero, 42),
 ];
 
 /// Convert an `Error` to its on-chain discriminant using the [`repr(u32)`]
@@ -1439,6 +1459,9 @@ pub(super) fn variant_name(e: Error) -> &'static str {
         Error::NoValidBids => "NoValidBids",
         Error::RoundFull => "RoundFull",
         Error::InvalidLimit => "InvalidLimit",
+        Error::SealRoundTooEarly => "SealRoundTooEarly",
+        Error::SealRoundTooLate => "SealRoundTooLate",
+        Error::InvalidSealRoundZero => "InvalidSealRoundZero",
     }
 }
 
@@ -1486,7 +1509,7 @@ fn error_table_enumerates_every_variant() {
     // DOCUMENTED_ERROR_CODES.
     assert_eq!(
         DOCUMENTED_ERROR_CODES.len(),
-        27,
+        30,
         "DOCUMENTED_ERROR_CODES appears missing entries. The exhaustive \
          `variant_name` match already enforces parity at compile time — \
          update it together with this list and contracts/round/ERRORS.md."
@@ -1499,11 +1522,12 @@ fn error_codes_use_reserved_ranges() {
     //   1–4     → initialization/lookup
     //   10–22   → lifecycle/timing
     //   30–39   → crypto/validation
+    //   40–42   → seal-round window
     // New categories should pick a fresh, contiguous range — not collide with
     // logging conventions — and update ERRORS.md at the same time.
     for (variant, code) in DOCUMENTED_ERROR_CODES {
         let name = variant_name(*variant);
-        let in_range = matches!(*code, 1..=4 | 10..=22 | 30..=39);
+        let in_range = matches!(*code, 1..=4 | 10..=22 | 30..=42);
         assert!(
             in_range,
             "{name} = {code} falls outside the documented code ranges; \

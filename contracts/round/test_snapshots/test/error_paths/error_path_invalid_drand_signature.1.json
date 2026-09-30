@@ -90,6 +90,7 @@
         }
       ]
     ],
+    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM",
@@ -119,6 +120,9 @@
                 },
                 {
                   "bytes": "69642d626c6f62"
+                },
+                {
+                  "u64": 29155654
                 }
               ]
             }
