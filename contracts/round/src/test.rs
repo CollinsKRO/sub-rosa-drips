@@ -1511,3 +1511,438 @@ fn error_codes_use_reserved_ranges() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ISSUE #385 — SHARED SETTLEMENT FIXTURE (contract half)
+//
+// `contracts/round/fixtures/settlement-cases.txt` is read by BOTH suites:
+//
+//   contracts/round/src/test.rs                    — this file: drives the
+//       round contract through every row and asserts the exact payout or the
+//       exact error the contract answers with.
+//   services/keeper/src/settlement-guard.test.ts    — drives the keeper's
+//       settlement guard through the same rows and asserts its typed refusal
+//       (or its settlement plan).
+//
+// The rows the two suites used to disagree about are exactly the ones the
+// contract rejects: the guard used to submit a settle or a void the contract
+// reverts with `RoundVoided` / `NotVoidable`. Both halves now assert the same
+// numbers from the same file, so the guard's rules cannot drift from the
+// contract's without one of the two suites failing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SETTLEMENT_FIXTURE: &str = include_str!("../fixtures/settlement-cases.txt");
+const FIXTURE_MAX_BIDS: usize = 8;
+const FIXTURE_MAX_REFUNDS: usize = 8;
+
+/// Guard refusal → the contract error the very same view must fail with.
+/// These are the rules both suites promise to implement identically.
+const GUARD_REASON_CONTRACT_ERROR: &[(&str, &str)] = &[
+    ("already_settled", "AlreadySettled"),
+    ("round_voided", "RoundVoided"),
+    ("not_cleared", "NotCleared"),
+    ("missing_winner", "NoValidBids"),
+    ("void_not_open", "NotVoidable"),
+    ("void_grace_not_elapsed", "NotVoidable"),
+];
+
+/// Guard refusals that exist only because the keeper's *local view* is
+/// incomplete (truncated bidder page, unreadable bid state, a stale winner).
+/// The contract may well accept such a transaction — the guard still refuses,
+/// because it cannot promise a refund set it never read.
+const LOCAL_VIEW_GUARD_REASONS: &[&str] =
+    &["refund_missing", "bidder_page_incomplete", "winner_mismatch"];
+
+struct SettlementCase {
+    name: &'static str,
+    action: &'static str,
+    rule: &'static str,
+    status: &'static str,
+    grace: bool,
+    bids: [i128; FIXTURE_MAX_BIDS],
+    bid_count: usize,
+    escrows: [i128; FIXTURE_MAX_BIDS],
+    revealed: [bool; FIXTURE_MAX_BIDS],
+    read: usize,
+    winner_idx: i32,
+    operator: i128,
+    surplus: i128,
+    refunds: [(usize, i128); FIXTURE_MAX_REFUNDS],
+    refund_count: usize,
+    guard_reason: &'static str,
+    contract: &'static str,
+}
+
+fn fixture_field<'a, I: Iterator<Item = &'a str>>(it: &mut I) -> &'a str {
+    it.next()
+        .unwrap_or_else(|| panic!("settlement fixture row is missing a field"))
+}
+
+/// `?(500)` = the keeper could not read this bid state; the contract still
+/// holds 500. The contract side only ever needs the real amount.
+fn fixture_escrow(token: &str) -> i128 {
+    let inner = token.strip_prefix("?(").unwrap_or(token);
+    let inner = inner.strip_suffix(')').unwrap_or(inner);
+    inner.parse::<i128>().expect("fixture escrow must be an amount")
+}
+
+fn parse_settlement_case(line: &'static str) -> SettlementCase {
+    let mut it = line.split('|');
+    let name = fixture_field(&mut it);
+    let action = fixture_field(&mut it);
+    let rule = fixture_field(&mut it);
+    let status = fixture_field(&mut it);
+    let grace = fixture_field(&mut it) == "1";
+
+    let mut bids = [0i128; FIXTURE_MAX_BIDS];
+    let mut bid_count = 0usize;
+    for token in fixture_field(&mut it).split(',') {
+        assert!(bid_count < FIXTURE_MAX_BIDS, "{name}: too many bids");
+        bids[bid_count] = token.parse::<i128>().expect("fixture bid must be an amount");
+        bid_count += 1;
+    }
+
+    let mut escrows = [0i128; FIXTURE_MAX_BIDS];
+    let mut escrow_count = 0usize;
+    for token in fixture_field(&mut it).split(',') {
+        assert!(escrow_count < FIXTURE_MAX_BIDS, "{name}: too many escrows");
+        escrows[escrow_count] = fixture_escrow(token);
+        escrow_count += 1;
+    }
+    assert_eq!(bid_count, escrow_count, "{name}: bids and escrows must align");
+
+    let mut revealed = [false; FIXTURE_MAX_BIDS];
+    let mut reveal_count = 0usize;
+    for token in fixture_field(&mut it).split(',') {
+        assert!(reveal_count < FIXTURE_MAX_BIDS, "{name}: too many revealed flags");
+        revealed[reveal_count] = token == "1";
+        reveal_count += 1;
+    }
+    assert_eq!(bid_count, reveal_count, "{name}: bids and revealed flags must align");
+
+    let read = fixture_field(&mut it).parse::<usize>().expect("fixture read must be a count");
+    let winner_idx = fixture_field(&mut it).parse::<i32>().expect("fixture winner_idx must be an index");
+    let operator = fixture_field(&mut it).parse::<i128>().expect("fixture operator must be an amount");
+    let surplus = fixture_field(&mut it).parse::<i128>().expect("fixture surplus must be an amount");
+
+    let mut refunds = [(0usize, 0i128); FIXTURE_MAX_REFUNDS];
+    let mut refund_count = 0usize;
+    let refunds_field = fixture_field(&mut it);
+    if refunds_field != "-" {
+        for token in refunds_field.split(',') {
+            assert!(refund_count < FIXTURE_MAX_REFUNDS, "{name}: too many refunds");
+            let mut parts = token.split(':');
+            let idx = fixture_field(&mut parts).parse::<usize>().expect("refund index");
+            let amount = fixture_field(&mut parts).parse::<i128>().expect("refund amount");
+            assert!(parts.next().is_none(), "{name}: malformed refund {token}");
+            refunds[refund_count] = (idx, amount);
+            refund_count += 1;
+        }
+    }
+
+    let guard_reason = fixture_field(&mut it);
+    let contract = fixture_field(&mut it);
+    assert!(it.next().is_none(), "{name}: fixture row has trailing fields");
+
+    assert!(read <= bid_count, "{name}: keeper read exceeds the bidder index");
+    assert!(
+        matches!(action, "settle" | "void"),
+        "{name}: action must be settle or void"
+    );
+
+    SettlementCase {
+        name,
+        action,
+        rule,
+        status,
+        grace,
+        bids,
+        bid_count,
+        escrows,
+        revealed,
+        read,
+        winner_idx,
+        operator,
+        surplus,
+        refunds,
+        refund_count,
+        guard_reason,
+        contract,
+    }
+}
+
+fn contract_error_from_name(name: &str, case: &str) -> Error {
+    for (variant, _) in DOCUMENTED_ERROR_CODES {
+        if variant_name(*variant) == name {
+            return *variant;
+        }
+    }
+    panic!("{case}: {name} is not a contract error in src/types.rs")
+}
+
+fn status_from_name(name: &str) -> Status {
+    match name {
+        "Open" => Status::Open,
+        "Revealing" => Status::Revealing,
+        "Cleared" => Status::Cleared,
+        "Settled" => Status::Settled,
+        "Voided" => Status::Voided,
+        other => panic!("unknown round status {other} in the settlement fixture"),
+    }
+}
+
+struct CaseRound {
+    f: Fixture,
+    id: u64,
+    bidders: Vec<Address>,
+    operator: Address,
+    reveal_deadline: u64,
+}
+
+/// Build the on-chain round a fixture row describes: same bids, same escrow,
+/// the same reveal pattern, and the same status when the action is asked for.
+fn build_case_round(c: &SettlementCase) -> CaseRound {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let rule = match c.rule {
+        "LowestBid" => ClearingRule::LowestBid,
+        "HighestBid" => ClearingRule::HighestBid,
+        other => panic!("{}: unknown clearing rule {other}", c.name),
+    };
+    let id = drand_round(&f, &operator, commit_deadline, reveal_deadline, rule);
+
+    let mut bidders = Vec::new(&f.env);
+    let mut nonces: Vec<BytesN<32>> = Vec::new(&f.env);
+    for i in 0..c.bid_count {
+        let bidder = funded_bidder(&f, c.escrows[i]);
+        let nonce = commit_bid(&f, id, &bidder, c.bids[i], c.escrows[i], (i as u8) + 1);
+        bidders.push_back(bidder);
+        nonces.push_back(nonce);
+    }
+
+    // An Open round never opens the reveal window: `void` must be judged on
+    // status + grace alone.
+    if c.status == "Open" {
+        return CaseRound { f, id, bidders, operator, reveal_deadline };
+    }
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    for i in 0..c.bid_count {
+        if c.revealed[i] {
+            f.client.reveal(
+                &id,
+                &bidders.get(i as u32).unwrap(),
+                &c.bids[i],
+                &nonces.get(i as u32).unwrap(),
+            );
+        }
+    }
+
+    // A fully revealed round that has not been cleared yet: `void` must be
+    // judged on the status rule alone.
+    if c.status == "Revealing" {
+        return CaseRound { f, id, bidders, operator, reveal_deadline };
+    }
+
+    f.env.ledger().with_mut(|l| l.timestamp = reveal_deadline + 1);
+    let winner = f.client.clear(&id);
+    match winner {
+        Some(w) => {
+            assert!(
+                c.winner_idx >= 0,
+                "{}: clear found a winner but the fixture says -1",
+                c.name
+            );
+            assert_eq!(
+                w,
+                bidders.get(c.winner_idx as u32).unwrap(),
+                "{}: winner index",
+                c.name
+            );
+        }
+        None => assert_eq!(
+            c.winner_idx,
+            -1,
+            "{}: clear found no winner but the fixture says index {}",
+            c.name,
+            c.winner_idx
+        ),
+    }
+
+    CaseRound { f, id, bidders, operator, reveal_deadline }
+}
+
+fn run_settlement_case(c: &SettlementCase) {
+    let case = build_case_round(c);
+    let f = &case.f;
+    assert_eq!(
+        f.client.get_round(&case.id).status,
+        status_from_name(c.status),
+        "{}: status before the action",
+        c.name
+    );
+    // `read` is how much of the index the keeper's local view saw; the
+    // contract always reads the whole index itself, so all that matters here
+    // is that the row is well-formed. The truncation itself is the guard's
+    // half of the fixture (`bidder_page_incomplete`).
+    assert!(
+        c.read <= c.bid_count,
+        "{}: keeper read {} of {} bidders",
+        c.name,
+        c.read,
+        c.bid_count
+    );
+
+    // `grace = 1` places the clock past reveal_deadline + VOID_GRACE, `0`
+    // inside the window — the exact boundary `SubRosaRound::void` enforces.
+    let now = if c.grace {
+        case.reveal_deadline + 3_601
+    } else {
+        case.reveal_deadline + 100
+    };
+    f.env.ledger().with_mut(|l| l.timestamp = now);
+
+    if c.contract == "ok" {
+        if c.action == "settle" {
+            f.client.settle(&case.id);
+            assert_eq!(
+                f.client.get_round(&case.id).status,
+                Status::Settled,
+                "{}: settle must land",
+                c.name
+            );
+        } else {
+            f.client.void(&case.id);
+            assert_eq!(
+                f.client.get_round(&case.id).status,
+                Status::Voided,
+                "{}: void must land",
+                c.name
+            );
+        }
+
+        assert_eq!(
+            f.usdc_token.balance(&case.operator),
+            c.operator,
+            "{}: operator payout",
+            c.name
+        );
+        if c.winner_idx >= 0 {
+            assert_eq!(
+                f.usdc_token.balance(&case.bidders.get(c.winner_idx as u32).unwrap()),
+                c.surplus,
+                "{}: winner surplus",
+                c.name
+            );
+        } else {
+            assert_eq!(c.surplus, 0, "{}: surplus without a winner", c.name);
+        }
+        for i in 0..c.refund_count {
+            let (idx, amount) = c.refunds[i];
+            assert_eq!(
+                f.usdc_token.balance(&case.bidders.get(idx as u32).unwrap()),
+                amount,
+                "{}: refund for bidder {idx}",
+                c.name
+            );
+        }
+        assert_eq!(
+            f.usdc_token.balance(&f.client.address),
+            0,
+            "{}: contract must be drained",
+            c.name
+        );
+    } else {
+        let expected = contract_error_from_name(c.contract, c.name);
+        if c.action == "settle" {
+            assert_try_contract_err(f.client.try_settle(&case.id), expected);
+        } else {
+            assert_try_contract_err(f.client.try_void(&case.id), expected);
+        }
+        assert_eq!(
+            f.client.get_round(&case.id).status,
+            status_from_name(c.status),
+            "{}: a rejected action must not move the round",
+            c.name
+        );
+    }
+}
+
+/// Iterate every data row of the shared fixture (comments and the header
+/// line are skipped, exactly as the keeper suite does).
+fn for_each_settlement_case(mut run: impl FnMut(&SettlementCase)) {
+    let mut count = 0usize;
+    for line in SETTLEMENT_FIXTURE.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("name|") {
+            continue;
+        }
+        let case = parse_settlement_case(line);
+        run(&case);
+        count += 1;
+    }
+    assert!(
+        count >= 10,
+        "the shared settlement fixture must keep every row (parsed {count})"
+    );
+}
+
+#[test]
+fn settlement_fixture_drives_the_contract() {
+    for_each_settlement_case(run_settlement_case);
+}
+
+/// The agreement rule both suites assert: a row the contract rejects always
+/// carries the guard refusal that maps back to that exact error, a row the
+/// guard submits is always a row the contract accepts, and a local-view
+/// refusal never claims the contract would reject on its own.
+#[test]
+fn settlement_fixture_guard_reasons_match_contract_rules() {
+    for_each_settlement_case(|c| {
+        let mapped = GUARD_REASON_CONTRACT_ERROR
+            .iter()
+            .find(|(reason, _)| *reason == c.guard_reason)
+            .map(|(_, error)| *error);
+        let local_view = LOCAL_VIEW_GUARD_REASONS.contains(&c.guard_reason);
+
+        if c.guard_reason == "-" {
+            assert_eq!(
+                c.contract, "ok",
+                "{}: the guard submits only what the contract accepts",
+                c.name
+            );
+        } else {
+            assert!(
+                mapped.is_some() || local_view,
+                "{}: {} is not a guard reason both suites know",
+                c.name,
+                c.guard_reason
+            );
+            if let Some(error) = mapped {
+                assert_eq!(
+                    c.contract, error,
+                    "{}: guard reason {} must be exactly why the contract rejects",
+                    c.name, c.guard_reason
+                );
+            } else {
+                assert_eq!(
+                    c.contract, "ok",
+                    "{}: a local-view refusal must never claim the contract rejects",
+                    c.name
+                );
+            }
+        }
+
+        if c.contract != "ok" {
+            assert_ne!(
+                c.guard_reason, "-",
+                "{}: the contract rejects with {} — the guard must refuse too",
+                c.name,
+                c.contract
+            );
+            // The error name itself has to be a real variant, not a typo.
+            contract_error_from_name(c.contract, c.name);
+        }
+    });
+}

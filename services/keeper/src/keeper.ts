@@ -20,11 +20,23 @@ import type { SubRosaClient } from "@sub-rosa/sdk";
 import { openBid, fetchRoundSignature, type DrandClient } from "@sub-rosa/tlock";
 import { compareRoundIds } from "./store.js";
 import {
+  describeSettlementSkip,
+  evaluateVoid,
+  readSettlementView,
+  voidAfter,
+  type ContractSkipEvent,
+  type RoundSettlementView,
+  type SettlementGuard,
+  type SettlementSkipEvent,
+} from "./settlement-guard.js";
+import {
   resolveTimeContext,
   systemTime,
   type PartialTimeContext,
   type TimeContext,
 } from "@sub-rosa/time";
+
+export { VOID_GRACE_SECONDS } from "./settlement-guard.js";
 
 export type KeeperLogger = (msg: string) => void;
 
@@ -39,6 +51,13 @@ export interface KeeperDeps {
   pollMs?: number;
   /** Injectable wall clock and scheduler. Default: systemTime. */
   time?: PartialTimeContext;
+  /**
+   * Duplicate + contract-rule guard. When present, a settle or a void is
+   * refused (with a typed reason) if the local view of the round is one the
+   * contract would reject — incomplete bidder page, unreadable refund,
+   * winner mismatch, wrong status, or a void inside the grace window.
+   */
+  settlementGuard?: SettlementGuard;
 }
 
 export interface SkipRecord {
@@ -66,6 +85,17 @@ export function errorName(e: unknown): string {
 export function errorMatches(e: unknown, names: string[]): boolean {
   const diagnostic = JSON.stringify(normalizeError(e));
   return names.some((name) => diagnostic.includes(name));
+}
+
+/**
+ * Narrow a guard decision to a contract-rule refusal. A duplicate skip is
+ * already reported by the settlement indicator, so only the typed contract
+ * reason is carried on the close/void result.
+ */
+function contractRefusal(
+  event: SettlementSkipEvent,
+): ContractSkipEvent | undefined {
+  return event.event === "settlement_skipped_contract" ? event : undefined;
 }
 
 function keeperTime(deps: KeeperDeps): TimeContext {
@@ -229,6 +259,8 @@ export interface CloseResult {
   winner?: string;
   finalStatus: string;
   skipped: string[];
+  /** Set when the settlement guard refused to submit (typed contract rule). */
+  guardSkip?: ContractSkipEvent;
 }
 
 /** Drive a revealed round to completion: clear (after the reveal deadline) then
@@ -284,15 +316,38 @@ export async function closeRound(
 
   // ── Phase D: settle a cleared round (real SAC transfers) ──────────────
   if (round.status.tag === "Cleared") {
-    try {
-      await sdk.settle(rid);
-      result.settled = true;
-      log(`settled round ${rid}`);
-    } catch (e) {
-      if (errorMatches(e, ["AlreadySettled", "NotCleared", "WrongStatus"])) {
-        result.skipped.push(`settle skipped: ${errorName(e)}`);
+    const guard = deps.settlementGuard;
+    let refused = false;
+    if (guard) {
+      // The contract decides the winner and the refund set; we check our local
+      // view of both before paying for a transaction it would reject.
+      const view = await readSettlementView(sdk, rid, clock.nowSeconds());
+      const check = guard.checkSettle(view);
+      if (check.allowed) {
+        guard.markSubmitted(rid);
       } else {
-        throw e;
+        refused = true;
+        result.guardSkip = contractRefusal(check.event);
+        const reason = describeSettlementSkip(check.event);
+        result.skipped.push(`settle refused: ${reason}`);
+        log(`settle refused for round ${rid}: ${reason}`);
+      }
+    }
+
+    if (!refused) {
+      try {
+        await sdk.settle(rid);
+        result.settled = true;
+        guard?.markTerminal(rid, "settled on-chain");
+        log(`settled round ${rid}`);
+      } catch (e) {
+        if (errorMatches(e, ["AlreadySettled", "NotCleared", "WrongStatus"])) {
+          result.skipped.push(`settle skipped: ${errorName(e)}`);
+          guard?.markTerminal(rid, errorName(e));
+        } else {
+          guard?.markRetryable(rid, errorName(e));
+          throw e;
+        }
       }
     }
     round = await sdk.getRound(rid);
@@ -309,14 +364,39 @@ export async function closeRound(
   return result;
 }
 
-/** Matches `VOID_GRACE` in the Round contract (seconds after reveal_deadline). */
-export const VOID_GRACE_SECONDS = 3600;
-
 export interface VoidResult {
   roundId: bigint;
   voided: boolean;
   skipped: string[];
   finalStatus: string;
+  /** Set when the settlement guard refused to submit (typed contract rule). */
+  guardSkip?: ContractSkipEvent;
+}
+
+/**
+ * The status/grace half of the void rules, as a view with no bidder reads:
+ * `evaluateVoid` only inspects status and the grace window until the bidder
+ * page is consulted, so this decides "is a void even on the table?" without
+ * paying for the full read when it is not.
+ */
+function voidGateView(round: {
+  status: { tag: string };
+  clearing_rule?: { tag: string };
+  reveal_deadline: bigint | number;
+  winner?: string | null;
+  winning_bid?: bigint | null;
+}, roundId: bigint, nowSeconds: number): RoundSettlementView {
+  return {
+    roundId: roundId.toString(),
+    status: round.status.tag,
+    clearingRule: round.clearing_rule?.tag === "LowestBid" ? "LowestBid" : "HighestBid",
+    revealDeadline: Number(round.reveal_deadline),
+    nowSeconds,
+    bidders: [],
+    bidderTotal: 0,
+    winner: round.winner ?? null,
+    winningBid: round.winning_bid == null ? null : BigInt(round.winning_bid),
+  };
 }
 
 /** Liveness safety valve: void an Open round if R never arrived and grace elapsed. */
@@ -326,6 +406,7 @@ export async function voidIfStale(
 ): Promise<VoidResult> {
   const { sdk, log = () => {} } = deps;
   const { clock } = keeperTime(deps);
+  const guard = deps.settlementGuard;
   const rid = BigInt(roundId);
   const result: VoidResult = {
     roundId: rid,
@@ -334,34 +415,91 @@ export async function voidIfStale(
     finalStatus: "",
   };
 
-  let round = await sdk.getRound(rid);
+  const round = await sdk.getRound(rid);
+  const now = clock.nowSeconds();
+
+  // ── Cheap gate: only an Open round can ever be voided ──────────────────
   if (round.status.tag !== "Open") {
-    result.skipped.push(`status ${round.status.tag}`);
+    result.finalStatus = round.status.tag;
+    if (!guard) {
+      result.skipped.push(`status ${round.status.tag}`);
+      return result;
+    }
+    // A void of a round the contract would not accept (Revealing, Cleared,
+    // Settled, Voided) is refused with the typed rule the status endpoint
+    // shows — the keeper considered it and deliberately did not submit.
+    const checked = guard.checkVoid(voidGateView(round, rid, now));
+    const noteStatus = () => result.skipped.push(`status ${round.status.tag}`);
+    if (checked.allowed) {
+      noteStatus();
+      return result;
+    }
+    const refusal = contractRefusal(checked.event);
+    if (!refusal) {
+      // Duplicate suppression already reported this round; nothing withheld.
+      noteStatus();
+      return result;
+    }
+    result.guardSkip = refusal;
+    const reason = describeSettlementSkip(checked.event);
+    result.skipped.push(`void refused: ${reason}`);
+    log(`void refused for round ${rid}: ${reason}`);
+    return result;
+  }
+
+  const gate = evaluateVoid(voidGateView(round, rid, now));
+  if (!gate.allowed) {
+    // Open, but the contract would still reject it — record the typed reason
+    // the status endpoint shows instead of paying for a failed transaction.
+    if (guard) {
+      const refused = guard.checkVoid(voidGateView(round, rid, now));
+      if (!refused.allowed) {
+        result.guardSkip = contractRefusal(refused.event);
+        const reason = describeSettlementSkip(refused.event);
+        result.skipped.push(`void refused: ${reason}`);
+        log(`void refused for round ${rid}: ${reason}`);
+      }
+    } else {
+      result.skipped.push(
+        `void not yet allowed until ${voidAfter(Number(round.reveal_deadline))}`,
+      );
+    }
     result.finalStatus = round.status.tag;
     return result;
   }
 
-  const now = clock.nowSeconds();
-  const voidAfter = Number(round.reveal_deadline) + VOID_GRACE_SECONDS;
-  if (now <= voidAfter) {
-    result.skipped.push(`void not yet allowed until ${voidAfter}`);
-    result.finalStatus = round.status.tag;
-    return result;
+  // ── A void is on the table: verify the refund set before dispatching ───
+  if (guard) {
+    const view = await readSettlementView(sdk, rid, now);
+    const check = guard.checkVoid(view);
+    if (!check.allowed) {
+      result.guardSkip = contractRefusal(check.event);
+      const reason = describeSettlementSkip(check.event);
+      result.skipped.push(`void refused: ${reason}`);
+      log(`void refused for round ${rid}: ${reason}`);
+      const after = await sdk.getRound(rid);
+      result.finalStatus = after.status.tag;
+      return result;
+    }
+    guard.markSubmitted(rid);
   }
 
   try {
     await sdk.void(rid);
     result.voided = true;
+    guard?.markTerminal(rid, "voided on-chain");
     log(`voided round ${rid} (Drand liveness / grace elapsed)`);
   } catch (e) {
     if (errorMatches(e, ["NotVoidable", "WrongStatus", "AlreadyCleared"])) {
       result.skipped.push(errorName(e));
+      guard?.markTerminal(rid, errorName(e));
     } else {
+      guard?.markRetryable(rid, errorName(e));
       throw e;
     }
   }
-  round = await sdk.getRound(rid);
-  result.finalStatus = round.status.tag;
+  const after = await sdk.getRound(rid);
+  result.finalStatus = after.status.tag;
   return result;
 }
 
@@ -416,7 +554,7 @@ export async function watchRound(
   const tick: WatchTickResult = { roundId: rid, finalStatus: "" };
 
   const voidRes = await voidIfStale(deps, rid);
-  if (voidRes.voided) tick.void = voidRes;
+  if (voidRes.voided || voidRes.guardSkip) tick.void = voidRes;
 
   let round = await deps.sdk.getRound(rid);
   if (round.status.tag === "Open" || round.status.tag === "Revealing") {

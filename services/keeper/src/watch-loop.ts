@@ -122,7 +122,7 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
 
   const resolvedTime = resolveTimeContext(systemTime, time);
   const { clock, scheduler } = resolvedTime;
-  const deps: KeeperDeps = { sdk, drand, log, time: resolvedTime };
+  const deps: KeeperDeps = { sdk, drand, log, time: resolvedTime, settlementGuard };
   const owner = explicitOwner?.trim() || generateLeaseOwner();
 
   while (!isStopping()) {
@@ -167,12 +167,6 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
         continue;
       }
       try {
-        const canSettleCheck = settlementGuard.canSettle(roundId);
-        if (!canSettleCheck.allowed) {
-          // Settlement already in-flight or terminal; skip the close phase.
-          // The keep phase may still open/reveal; we let watchRound proceed but
-          // settle manipulation is avoided by the guard's skip marker.
-        }
         const tick = await watchRound(deps, roundId);
         const active =
           tick.finalStatus !== "Settled" && tick.finalStatus !== "Voided";
@@ -187,6 +181,16 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
           settlementGuard.markTerminal(roundId, "settled on-chain");
         } else if (tick.close?.voided || tick.finalStatus === "Voided") {
           settlementGuard.markTerminal(roundId, "voided on-chain");
+        }
+
+        // The guard refused a submission the contract would have rejected.
+        // Logged even though nothing was submitted (so `acted` stays false).
+        const refusal = tick.close?.guardSkip ?? tick.void?.guardSkip;
+        if (refusal) {
+          log(
+            `[round ${roundId}] settlement_skipped_contract ${refusal.action}: ` +
+              `${refusal.reason} — ${refusal.detail}`,
+          );
         }
 
         store.updateRound(roundId, {

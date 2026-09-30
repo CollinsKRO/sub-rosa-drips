@@ -96,6 +96,7 @@ async function main() {
         if (entry.status === "submitted") return "submitted";
         return "terminal";
       },
+      guardSkip: (rid) => settlementGuard.getEntry(rid)?.skip ?? null,
     });
     statusHandle = withGracefulShutdown(server);
     diagnostics.info("status-api-http", `· status API: http://${statusHost}:${statusPort} (GET /status, /status/rounds/:id, /healthz, /status/health)`);
