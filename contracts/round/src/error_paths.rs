@@ -45,6 +45,7 @@ const ERROR_PATH_REGISTRY: &[(Error, &'static str)] = &[
     (Error::NoValidBids, "error_path_no_valid_bids"),
     (Error::RoundFull, "error_path_round_full"),
     (Error::InvalidLimit, "error_path_invalid_limit"),
+    (Error::EscrowNotConserved, "error_path_escrow_not_conserved"),
 ];
 
 fn oversized_bytes(env: &Env, len: u32) -> Bytes {
@@ -87,7 +88,7 @@ fn settle_happy_path(f: &Fixture, t_reveal: u64, commit_deadline: u64, reveal_de
 fn error_paths_registry_covers_every_variant() {
     assert_eq!(
         ERROR_PATH_REGISTRY.len(),
-        27,
+        28,
         "update ERROR_PATH_REGISTRY when adding/removing Error variants"
     );
     for (variant, name) in ERROR_PATH_REGISTRY {
@@ -534,4 +535,46 @@ fn error_path_invalid_limit() {
     let id = open_round(&f, &operator);
     assert_try_contract_err(f.client.try_get_bidders_page(&id, &0, &0), Error::InvalidLimit);
     assert_try_contract_err(f.client.try_get_bidders_page(&id, &0, &101), Error::InvalidLimit);
+}
+
+#[test]
+fn error_path_escrow_not_conserved() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+    let alice = funded_bidder(&f, 1_000);
+    let a_nonce = commit_bid(&f, id, &alice, 500, 500, 0x01);
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    f.client.reveal(&id, &alice, &500, &a_nonce);
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp = reveal_deadline + 1);
+    f.client.clear(&id);
+
+    // A winning bid above the winner's escrow would mint tokens out of escrow.
+    f.env.as_contract(&f.client.address, || {
+        let mut round = get_round(&f.env, id).unwrap();
+        round.winning_bid = 900;
+        set_round(&f.env, id, &round);
+    });
+
+    assert_try_contract_err(f.client.try_settle(&id), Error::EscrowNotConserved);
+    assert_eq!(
+        f.usdc_token.balance(&operator),
+        0,
+        "a rejected settle must not pay the operator"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&f.client.address),
+        500,
+        "a rejected settle must leave every escrow locked"
+    );
+    assert_eq!(f.client.get_round(&id).status, Status::Cleared);
 }

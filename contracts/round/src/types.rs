@@ -35,6 +35,8 @@ pub enum Error {
     NoValidBids = 37,
     RoundFull = 38,
     InvalidLimit = 39,
+    // Escrow accounting
+    EscrowNotConserved = 40,
 }
 
 /// Round lifecycle. Mirrors the state machine in PRD §6.
@@ -139,6 +141,33 @@ pub struct BiddersPage {
     pub total: u32,
 }
 
+/// Per-round escrow accounting (Persistent). One ledger, written by every path
+/// that moves tokens, holding the three cumulative flows the conservation
+/// predicate is proved against:
+///
+/// `committed == payout + refunds + locked`
+///
+/// `committed` is cumulative and never decreases: it counts every escrow ever
+/// locked for the round, including escrow later returned by an
+/// overwrite-before-close. `payout` and `refunds` count every token that has
+/// left the contract for this round. `locked` is the balance still held on
+/// behalf of the round's bids, and is maintained as an independent accumulator
+/// rather than derived, so an arithmetic slip in any transfer path is caught
+/// instead of cancelled out.
+#[contracttype]
+#[derive(Clone)]
+pub struct EscrowLedger {
+    /// Cumulative escrow received for this round (Σ of every commit).
+    pub committed: i128,
+    /// Cumulative tokens transferred to the round operator as the settled bid.
+    pub payout: i128,
+    /// Cumulative tokens transferred back to bidders (overwrite refunds,
+    /// winner surplus, loser refunds, and void refunds).
+    pub refunds: i128,
+    /// Escrow still locked for this round.
+    pub locked: i128,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -147,4 +176,5 @@ pub enum DataKey {
     Round(u64),
     State(u64, Address),
     Seal(u64, Address),
+    Escrow(u64),
 }

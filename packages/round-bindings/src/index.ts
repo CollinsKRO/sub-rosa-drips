@@ -80,7 +80,8 @@ export const Errors = {
   36: {message:"DeadlineInPast"},
   37: {message:"NoValidBids"},
   38: {message:"RoundFull"},
-  39: {message:"InvalidLimit"}
+  39: {message:"InvalidLimit"},
+  40: {message:"EscrowNotConserved"}
 }
 
 
@@ -122,7 +123,7 @@ reveal_round: u64;
  */
 export type Status = {tag: "Open", values: void} | {tag: "Revealing", values: void} | {tag: "Cleared", values: void} | {tag: "Settled", values: void} | {tag: "Voided", values: void};
 
-export type DataKey = {tag: "Config", values: void} | {tag: "RoundCounter", values: void} | {tag: "Round", values: readonly [u64]} | {tag: "State", values: readonly [u64, string]} | {tag: "Seal", values: readonly [u64, string]};
+export type DataKey = {tag: "Config", values: void} | {tag: "RoundCounter", values: void} | {tag: "Round", values: readonly [u64]} | {tag: "State", values: readonly [u64, string]} | {tag: "Seal", values: readonly [u64, string]} | {tag: "Escrow", values: readonly [u64]};
 
 
 /**
@@ -166,6 +167,42 @@ next_cursor: u32;
  * Total number of bidders in the round.
  */
 total: u32;
+}
+
+
+/**
+ * Per-round escrow accounting (Persistent). One ledger, written by every path
+ * that moves tokens, holding the three cumulative flows the conservation
+ * predicate is proved against:
+ *
+ * `committed == payout + refunds + locked`
+ *
+ * `committed` is cumulative and never decreases: it counts every escrow ever
+ * locked for the round, including escrow later returned by an
+ * overwrite-before-close. `payout` and `refunds` count every token that has
+ * left the contract for this round. `locked` is the balance still held on
+ * behalf of the round's bids, and is maintained as an independent accumulator
+ * rather than derived, so an arithmetic slip in any transfer path is caught
+ * instead of cancelled out.
+ */
+export interface EscrowLedger {
+  /**
+ * Cumulative escrow received for this round (Σ of every commit).
+ */
+committed: i128;
+  /**
+ * Cumulative tokens transferred to the round operator as the settled bid.
+ */
+payout: i128;
+  /**
+ * Cumulative tokens transferred back to bidders (overwrite refunds,
+ * winner surplus, loser refunds, and void refunds).
+ */
+refunds: i128;
+  /**
+ * Escrow still locked for this round.
+ */
+locked: i128;
 }
 
 /**

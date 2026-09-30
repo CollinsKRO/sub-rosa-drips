@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: MIT
+import type {
+  EscrowConservationPhase,
+  EscrowConservationReport,
+} from "./conservation.js";
+
 export class SubRosaClientConfigError extends Error {
   readonly name = "SubRosaClientConfigError";
 
@@ -81,7 +86,8 @@ export type PreflightFailureKind =
   | "simulation_error"
   | "expired_state"
   | "contract_error"
-  | "malformed_response";
+  | "malformed_response"
+  | "escrow_not_conserved";
 
 export interface SubRosaPreflightErrorParams {
   kind: PreflightFailureKind;
@@ -112,6 +118,48 @@ export class SubRosaPreflightError extends Error {
     this.contractErrorCode = params.contractErrorCode;
     this.contractErrorMessage = params.contractErrorMessage;
     this.restoreMinResourceFee = params.restoreMinResourceFee;
+  }
+}
+
+export interface EscrowConservationErrorParams {
+  roundId: bigint;
+  /** The operation whose escrow accounting failed to balance. */
+  phase: EscrowConservationPhase;
+  report: EscrowConservationReport;
+  cause?: unknown;
+}
+
+/**
+ * Typed error for a round whose escrow does not reconcile before payout.
+ *
+ * The Round contract refuses to `settle` or `void` such a round with
+ * `EscrowNotConserved`; this error is the off-chain equivalent, raised before
+ * any transaction is built, so a keeper can halt instead of burning a fee.
+ */
+export class SubRosaEscrowConservationError extends SubRosaPreflightError {
+  readonly roundId: bigint;
+  readonly phase: EscrowConservationPhase;
+  readonly report: EscrowConservationReport;
+
+  constructor(params: EscrowConservationErrorParams) {
+    const stranded = params.report.stranded;
+    const summary = params.report.issues
+      .slice(0, 3)
+      .map((i) => i.message)
+      .join("; ");
+    super({
+      kind: "escrow_not_conserved",
+      operation: params.phase,
+      message:
+        `round ${params.roundId} does not conserve escrow before ${params.phase}: ` +
+        `held ${params.report.escrowHeld}, pays ${params.report.payable}, ` +
+        `refunds ${params.report.refundable}, strands ${stranded}` +
+        (summary ? ` (${summary})` : ""),
+      cause: params.cause,
+    });
+    this.roundId = params.roundId;
+    this.phase = params.phase;
+    this.report = params.report;
   }
 }
 

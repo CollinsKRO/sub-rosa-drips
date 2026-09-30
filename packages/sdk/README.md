@@ -23,3 +23,44 @@ cached for later calls. A mismatch throws `SubRosaNetworkMismatchError` before
 simulation, signing, or submission, with the conflicting values and a suggested
 fix. Contract IDs do not encode a Stellar network, so copying a `C...` address
 between Testnet and Mainnet requires updating all three configuration values.
+
+## Escrow conservation preflight
+
+The contract keeps one identity per round — the escrow it holds equals the
+payout plus refunds plus whatever is still locked — and refuses to `settle` or
+`void` a round that cannot prove it, failing with `EscrowNotConserved`. The SDK
+re-derives the same accounting off-chain so a keeper can halt before paying a
+fee.
+
+`proveEscrowConservation` walks the bidder index in pages, reads every bid
+state, and cross-checks the walk against the bidder list on the round record. It
+never throws; a drifted, duplicated, or unreadable index comes back as an issue
+on the report:
+
+```ts
+const report = await client.proveEscrowConservation(roundId, "settle");
+if (!report.conserved) {
+  for (const issue of report.issues) console.warn(issue.code, issue.message);
+}
+```
+
+`preflightSettleConservation` and `preflightVoidConservation` are the stricter
+wrappers: they throw `SubRosaEscrowConservationError` (a `SubRosaPreflightError`
+with `kind: "escrow_not_conserved"`) carrying the `roundId`, the `phase`, and
+the full report, so a keeper can branch on `error.kind` instead of parsing text.
+
+```ts
+try {
+  await client.preflightSettleConservation(roundId);
+  await client.settle(roundId);
+} catch (error) {
+  if (error instanceof SubRosaEscrowConservationError) {
+    console.error(error.roundId, error.phase, error.report.issues);
+  }
+}
+```
+
+Issue codes cover page drift (`page_total_drift`, `page_count_mismatch`,
+`cursor_stalled`), index integrity (`duplicate_bidder`, `index_mismatch`,
+`bid_state_missing`, `bidder_already_settled`, `winner_not_indexed`), and the
+accounting itself (`escrow_stranded`, `round_wrong_status`, `no_winner`).

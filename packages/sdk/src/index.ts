@@ -28,6 +28,7 @@ export {
 } from "./submitter.js";
 export {
   SubRosaClientConfigError,
+  SubRosaEscrowConservationError,
   SubRosaMissingReturnValueError,
   SubRosaNetworkMismatchError,
   SubRosaPreflightError,
@@ -36,11 +37,29 @@ export {
   SubRosaTransactionError,
 } from "./errors.js";
 export type {
+  EscrowConservationErrorParams,
   NetworkMismatchErrorParams,
   PreflightFailureKind,
   SubRosaPreflightErrorParams,
   TimeoutErrorParams,
 } from "./errors.js";
+
+// Escrow conservation: the off-chain mirror of the contract's
+// EscrowNotConserved guard (issue #374).
+export {
+  ESCROW_MAX_BIDDERS,
+  ESCROW_PAGE_SIZE,
+  evaluateEscrowConservation,
+  isEscrowConserved,
+  proveEscrowConservationFromPages,
+  type EscrowConservationIssue,
+  type EscrowConservationIssueCode,
+  type EscrowConservationPhase,
+  type EscrowConservationReport,
+  type EscrowConservationSource,
+  type EscrowConservationTotals,
+  type ProveEscrowConservationOptions,
+} from "./conservation.js";
 export {
   validateContractNetwork,
   type ContractNetworkValidationConfig,

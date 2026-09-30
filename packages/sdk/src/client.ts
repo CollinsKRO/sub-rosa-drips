@@ -7,6 +7,7 @@
 // exactly what the contract expects.
 
 import { Keypair, rpc } from "@stellar/stellar-sdk";
+import { normalizeError } from "@sub-rosa/logging/errors";
 import type {
   AssembledTransaction,
   Result,
@@ -34,7 +35,17 @@ import {
   type PreflightResult,
 } from "./preflight.js";
 import {
+  ESCROW_PAGE_SIZE,
+  evaluateEscrowConservation,
+  proveEscrowConservationFromPages,
+  type EscrowConservationIssue,
+  type EscrowConservationPhase,
+  type EscrowConservationReport,
+  type ProveEscrowConservationOptions,
+} from "./conservation.js";
+import {
   SubRosaClientConfigError,
+  SubRosaEscrowConservationError,
   SubRosaMissingReturnValueError,
   SubRosaNetworkMismatchError,
   SubRosaSubmitError,
@@ -535,6 +546,145 @@ export class SubRosaClient {
         this.contract.void({ round_id: toBigInt(roundId) }),
       ),
     );
+  }
+
+  // ── Escrow conservation (issue #374) ──────────────────────────────────
+
+  /**
+   * Re-derive a round's escrow accounting from the bidder index and prove it
+   * balances before any payout runs.
+   *
+   * This is the off-chain mirror of the contract's `EscrowNotConserved` guard:
+   * the escrow the index attributes to the round must be exactly the escrow
+   * the pending operation moves, and every bidder must have a readable, unpaid
+   * bid state. Never throws — a drifted or unreadable index comes back as an
+   * issue on the report with `conserved: false`.
+   *
+   * @param phase Operation about to run. `settle` also accounts for the
+   *   operator payout recorded by `clear`.
+   */
+  async proveEscrowConservation(
+    roundId: number | bigint,
+    phase: EscrowConservationPhase = "settle",
+    options: ProveEscrowConservationOptions = {},
+  ): Promise<EscrowConservationReport> {
+    const rid = normalizeRoundId(roundId);
+    const round = await this.getRound(rid);
+    const issues: EscrowConservationIssue[] = [...(options.issues ?? [])];
+
+    // `clear` and `void` only move escrow out of a revealing round; `settle`
+    // only pays out of a cleared one.
+    const expected = phase === "settle" ? "Cleared" : "Revealing";
+    if (round.status.tag !== expected) {
+      issues.push({
+        code: "round_wrong_status",
+        message: `round ${rid} is ${round.status.tag}; ${phase} requires ${expected}`,
+      });
+    }
+    if (phase === "settle") {
+      if (!round.winner) {
+        issues.push({
+          code: "no_winner",
+          message: `round ${rid} was cleared without a winner, so it cannot be settled`,
+        });
+      } else if (round.winning_bid === undefined) {
+        issues.push({
+          code: "no_winner",
+          message: `round ${rid} has a winner but no winning bid to pay out`,
+        });
+      }
+    }
+
+    const payable =
+      phase === "settle" && round.winning_bid !== undefined && round.winner
+        ? BigInt(round.winning_bid)
+        : 0n;
+
+    return proveEscrowConservationFromPages(
+      {
+        getBiddersPage: async (cursor, limit) =>
+          (await this.getBiddersPage(rid, cursor, limit)) as BiddersPage,
+        getBidState: async (bidder) => {
+          try {
+            return await this.getBidState(rid, bidder);
+          } catch {
+            return undefined;
+          }
+        },
+      },
+      {
+        pageSize: ESCROW_PAGE_SIZE,
+        ...options,
+        payable,
+        // The contract pays out of `round.bidders`, so the paged walk is
+        // cross-checked against the list the round record already carries.
+        expectedBidders: options.expectedBidders ?? round.bidders,
+        // A void pays nobody, so the winner's surplus is not in play; a settle
+        // returns the winner's escrow above their bid.
+        ...(phase === "settle" && round.winner
+          ? { winner: round.winner }
+          : {}),
+        issues,
+      },
+    );
+  }
+
+  /**
+   * Preflight `settle` against escrow conservation.
+   *
+   * Resolves with a conserved report, or fails with the typed
+   * `SubRosaEscrowConservationError` — no transaction is built either way.
+   */
+  async preflightSettleConservation(
+    roundId: number | bigint,
+    options: ProveEscrowConservationOptions = {},
+  ): Promise<EscrowConservationReport> {
+    const rid = normalizeRoundId(roundId);
+    let report: EscrowConservationReport;
+    try {
+      report = await this.proveEscrowConservation(rid, "settle", options);
+    } catch (cause) {
+      throw new SubRosaEscrowConservationError({
+        roundId: rid,
+        phase: "settle",
+        report: evaluateEscrowConservation({
+          bidders: 0,
+          escrowHeld: 0n,
+          refundable: 0n,
+          payable: 0n,
+          winnerEscrow: 0n,
+          issues: [
+            {
+              code: "bid_state_missing",
+              message: `escrow accounting could not be read: ${normalizeError(cause).message}`,
+            },
+          ],
+        }),
+        cause,
+      });
+    }
+    if (!report.conserved) {
+      throw new SubRosaEscrowConservationError({
+        roundId: rid,
+        phase: "settle",
+        report,
+      });
+    }
+    return report;
+  }
+
+  /** Preflight `void`: every escrow must be refundable and nothing may already
+   *  be settled, because a void pays nobody. */
+  async preflightVoidConservation(
+    roundId: number | bigint,
+    options: ProveEscrowConservationOptions = {},
+  ): Promise<EscrowConservationReport> {
+    const rid = normalizeRoundId(roundId);
+    const report = await this.proveEscrowConservation(rid, "void", options);
+    if (!report.conserved) {
+      throw new SubRosaEscrowConservationError({ roundId: rid, phase: "void", report });
+    }
+    return report;
   }
 
   // ── Read-only views (simulation only; no signing/submission) ───────────
