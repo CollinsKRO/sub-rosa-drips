@@ -23,7 +23,8 @@ import {
 import { toHex } from "@sub-rosa/tlock";
 import type { SealedBid } from "@sub-rosa/tlock";
 import type { RoundReceipt } from "./receipt.js";
-import { validateEncryptedBlob } from "./encrypted-blob.js";
+import { assertSealedBid } from "./encrypted-blob.js";
+import type { SealedBidBinding } from "./encrypted-blob.js";
 import { networkFingerprint } from "./receipt.js";
 import type { TransactionSubmitter } from "./submitter.js";
 import {
@@ -100,6 +101,16 @@ export interface CommitParams {
   escrow: bigint;
   /** Bidder address. Default: the configured signer's public key. */
   bidder?: string;
+  /**
+   * The value, nonce, and Drand round the seal was produced from.
+   *
+   * Supplying it makes `commit` verify the seal against them before submitting
+   * — same acceptance rule the sealer works to, so a blob that decodes but
+   * commits to the wrong value is rejected here instead of becoming an
+   * on-chain commitment the contract can never open. The value is never logged
+   * or included in the resulting error.
+   */
+  binding?: SealedBidBinding;
 }
 
 export interface RevealParams {
@@ -276,26 +287,12 @@ export class SubRosaClient {
   }
 
   async commit(params: CommitParams): Promise<void> {
-    // Validate encrypted blobs before submitting — catches size/encoding
-    // issues early, before paying gas for an on-chain revert (PayloadTooLarge).
-    const ciphertextResult = validateEncryptedBlob(
-      params.sealed.ciphertext,
-      "ciphertext",
-    );
-    if (!ciphertextResult.valid) {
-      throw new SubRosaClientConfigError(
-        ciphertextResult.issues.map((i) => i.message).join("; "),
-      );
-    }
-    const auditorBlobResult = validateEncryptedBlob(
-      params.sealed.auditorBlob,
-      "auditor_blob",
-    );
-    if (!auditorBlobResult.valid) {
-      throw new SubRosaClientConfigError(
-        auditorBlobResult.issues.map((i) => i.message).join("; "),
-      );
-    }
+    // Gate the seal before submitting. Size/encoding defects surface here
+    // instead of as an on-chain PayloadTooLarge revert, and — when the caller
+    // passes the value/nonce/round it sealed from — a blob whose commitment
+    // does not match never reaches the chain, where it would be committed and
+    // never open.
+    assertSealedBid(params.sealed, params.binding);
 
     const bidder = params.bidder ?? this.#requireSource("bidder");
     const tx = await this.contract.commit({
