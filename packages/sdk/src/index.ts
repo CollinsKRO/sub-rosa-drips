@@ -28,6 +28,8 @@ export {
 } from "./submitter.js";
 export {
   SubRosaClientConfigError,
+  SubRosaDeploymentMismatchError,
+  SubRosaManifestError,
   SubRosaMissingReturnValueError,
   SubRosaNetworkMismatchError,
   SubRosaPreflightError,
@@ -36,6 +38,8 @@ export {
   SubRosaTransactionError,
 } from "./errors.js";
 export type {
+  DeploymentMismatchErrorParams,
+  ManifestErrorParams,
   NetworkMismatchErrorParams,
   PreflightFailureKind,
   SubRosaPreflightErrorParams,
@@ -58,11 +62,20 @@ export {
   type BlobValidationResult,
 } from "./encrypted-blob.js";
 export {
+  DEPLOYMENT_CHECK_IDS,
+  DEPLOYMENT_FIELDS,
+  DEPLOYMENT_FIELD_LABELS,
   MAINNET_ARTIFACTS,
   MAINNET_CONFIRM_PHRASE,
   MAINNET_DEPLOY_MIN_XLM_STROOPS,
+  MAINNET_MANIFEST,
+  MAINNET_MANIFEST_PATH,
   MAINNET_MICRO_MAX_ESCROW,
   MAINNET_MIN_FEE_RESERVE_STROOPS,
+  MAINNET_XLM_SAC_ID,
+  parseMainnetManifest,
+  type DeploymentField,
+  type MainnetManifest,
 } from "./mainnet-artifacts.js";
 export {
   AssetConfigError,
@@ -73,21 +86,36 @@ export {
   type AssetType,
 } from "./asset-config.js";
 export {
+  assertDeploymentMatches,
   assertMainnetConfirmed,
   assertMicroAmounts,
   assertReadinessForExecute,
+  compareDeployment,
   createSacBalanceReader,
   defaultMainnetReadinessInput,
+  deploymentChecks,
   fetchContractWasmHash,
+  fixtureDeployment,
+  fixtureReader,
   formatReadinessReport,
   hasBlockingFailures,
   nativeXlmSacId,
+  parseMainnetReadinessFixture,
+  readLiveDeployment,
   runMainnetReadiness,
+  summarizeDeploymentValue,
   verifySettledRoundProof,
+  type DeploymentComparison,
+  type DeploymentFieldComparison,
+  type MainnetFixtureBid,
+  type MainnetFixtureRound,
+  type MainnetLiveDeployment,
   type MainnetReadinessDeps,
+  type MainnetReadinessFixture,
   type MainnetReadinessInput,
   type MainnetReadinessReport,
   type ReadinessCheck,
+  type ReadinessReader,
   type ReadinessStatus,
 } from "./mainnet-readiness.js";
 
