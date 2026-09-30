@@ -1,7 +1,11 @@
-import { KeeperStore } from "./store.js";
+import { normalizeError } from "@sub-rosa/logging/errors";
+// Copyright (c) 2026 Sub Rosa contributors
+import { createLogger } from '@sub-rosa/logging';
+const diagnostics = createLogger("services.keeper.src.queue");
+import { KeeperStore, normalizeRoundId } from "./store.js";
 
 function usage() {
-  console.log(`
+  diagnostics.info("usage-npm-run-queue-command-args-commands-add-roundid-a", `
 Usage: npm run queue <command> [args]
 
 Commands:
@@ -22,40 +26,47 @@ function main() {
   const store = new KeeperStore();
 
   if (cmd === "add") {
-    const roundId = args[1];
-    if (!roundId) {
-      console.error("Error: missing roundId");
+    const rawRoundId = args[1];
+    if (!rawRoundId) {
+      diagnostics.error("error-missing-roundid", "Error: missing roundId");
       usage();
     }
+    const roundId = normalizeRoundId(rawRoundId);
     const contractId = process.env.ROUND_CONTRACT_ID;
     const network = process.env.NETWORK_PASSPHRASE;
     store.addRound(roundId, { contractId, network });
-    console.log(`Added round ${roundId} to the queue.`);
+    diagnostics.info("added-round", `Added round ${roundId} to the queue.`);
   } else if (cmd === "list") {
     const rounds = store.listRounds();
     if (rounds.length === 0) {
-      console.log("Queue is empty.");
+      diagnostics.info("queue-is-empty", "Queue is empty.");
       return;
     }
-    console.log(`Watching ${rounds.length} rounds:\n`);
+    diagnostics.info("watching", `Watching ${rounds.length} rounds:\n`);
     for (const r of rounds) {
       const extra = r.lastAction ? ` (action: ${r.lastAction})` : "";
       const err = r.lastError ? ` (error: ${r.lastError})` : "";
       const contract = r.contractId ? ` [${r.contractId}]` : "";
-      console.log(`- Round ${r.roundId}${contract}: ${r.lastStatus}${extra}${err} [retries: ${r.retryCount}]`);
+      diagnostics.info("round", `- Round ${r.roundId}${contract}: ${r.lastStatus}${extra}${err} [retries: ${r.retryCount}]`);
     }
   } else if (cmd === "remove") {
-    const roundId = args[1];
-    if (!roundId) {
-      console.error("Error: missing roundId");
+    const rawRoundId = args[1];
+    if (!rawRoundId) {
+      diagnostics.error("error-missing-roundid-2", "Error: missing roundId");
       usage();
     }
+    const roundId = normalizeRoundId(rawRoundId);
     store.removeRound(roundId);
-    console.log(`Removed round ${roundId} from the queue.`);
+    diagnostics.info("removed-round", `Removed round ${roundId} from the queue.`);
   } else {
-    console.error(`Unknown command: ${cmd}`);
+    diagnostics.error("unknown-command", `Unknown command: ${cmd}`);
     usage();
   }
 }
 
-main();
+try {
+  main();
+} catch (error) {
+  diagnostics.error("error", `Error: ${normalizeError(error).message}`);
+  process.exit(1);
+}

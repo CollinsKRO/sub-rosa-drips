@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Commitment byte encoding — byte-for-byte identical to the Round contract.
 //
 // The contract computes H = sha256(value.to_be_bytes() ‖ nonce.to_array()),
@@ -100,9 +101,26 @@ export function toHex(bytes: Uint8Array): string {
     .join("");
 }
 
+const HEX_RE = /^[0-9a-fA-F]*$/;
+
+/**
+ * Returns true if `hex` (optionally `0x` or `0X` prefixed) is a valid, even-length hexadecimal string.
+ */
+export function isValidHex(hex: string): boolean {
+  if (typeof hex !== "string") return false;
+  const clean = hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
+  return clean.length % 2 === 0 && HEX_RE.test(clean);
+}
+
 export function fromHex(hex: string): Uint8Array {
-  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (typeof hex !== "string") {
+    throw new Error("hex must be a string");
+  }
+  const clean = hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
   if (clean.length % 2 !== 0) throw new Error("odd hex length");
+  if (!HEX_RE.test(clean)) {
+    throw new Error("invalid hex characters");
+  }
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i++) {
     out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);

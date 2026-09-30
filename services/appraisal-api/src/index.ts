@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Sub Rosa contributors
 export {
   APPRAISAL_MODEL,
   appraise,
@@ -17,6 +18,7 @@ export {
 } from "./config.js";
 export {
   createPaidFetch,
+  AppraisalResponseParseError,
   X402PaymentError,
   type PaidClientConfig,
   type PaidResult,

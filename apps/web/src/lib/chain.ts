@@ -1,3 +1,5 @@
+import { normalizeError, publicErrorMessage } from "@sub-rosa/logging/errors";
+// Copyright (c) 2026 Sub Rosa contributors
 import { Buffer } from "buffer";
 import {
   getAddress,
@@ -6,6 +8,8 @@ import {
 } from "@stellar/freighter-api";
 import { RoundContract } from "@sub-rosa/sdk";
 import { useMemo } from "react";
+
+import { formatEscrowAmount } from "./amount";
 
 export const LOGO_SRC = "/sub-rosa-logo.png";
 export const RPC_URL = import.meta.env.VITE_RPC_URL ?? "https://soroban-testnet.stellar.org";
@@ -42,13 +46,11 @@ export const DEFAULT_COMMIT_DURATION_SECONDS = 27;
 
 export function freighterError(result: { error?: unknown }) {
   if (!result.error) return null;
-  return typeof result.error === "string"
-    ? result.error
-    : JSON.stringify(result.error);
+  return publicErrorMessage(result.error);
 }
 
 export function displayError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = normalizeError(error).message;
   if (message.includes("Contract, #10")) {
     return "Commit window closed. Create a fresh round, then commit before Drand reaches reveal.";
   }
@@ -61,7 +63,7 @@ export function displayError(error: unknown): string {
   if (message.includes("trustline entry is missing")) {
     return "Wallet is missing the escrow asset trustline. Fund the testnet wallet or use the XLM demo contract.";
   }
-  return message;
+  return publicErrorMessage(error);
 }
 
 export function toDemoEscrowAmount(value: number): bigint {
@@ -69,7 +71,7 @@ export function toDemoEscrowAmount(value: number): bigint {
 }
 
 export function formatDemoAmount(value: bigint): string {
-  return `${(Number(value) / 10_000_000).toFixed(4)} ${ESCROW_TOKEN_LABEL}`;
+  return formatEscrowAmount(value, ESCROW_TOKEN_LABEL);
 }
 
 export async function sha256Bytes(text: string): Promise<Uint8Array> {

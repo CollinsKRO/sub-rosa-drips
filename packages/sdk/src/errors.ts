@@ -1,8 +1,40 @@
+// SPDX-License-Identifier: MIT
 export class SubRosaClientConfigError extends Error {
   readonly name = "SubRosaClientConfigError";
 
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
+  }
+}
+
+export interface NetworkMismatchErrorParams {
+  contractId: string;
+  configuredPassphrase: string;
+  rpcPassphrase: string;
+  rpcUrl: string;
+  reason: "passphrase" | "contract_not_found";
+}
+
+/** Raised before contract simulation/signing when network configuration conflicts. */
+export class SubRosaNetworkMismatchError extends Error {
+  readonly name = "SubRosaNetworkMismatchError";
+  readonly contractId: string;
+  readonly configuredPassphrase: string;
+  readonly rpcPassphrase: string;
+  readonly rpcUrl: string;
+  readonly reason: NetworkMismatchErrorParams["reason"];
+
+  constructor(params: NetworkMismatchErrorParams) {
+    const message =
+      params.reason === "passphrase"
+        ? `networkPassphrase ${JSON.stringify(params.configuredPassphrase)} does not match RPC network ${JSON.stringify(params.rpcPassphrase)} at ${params.rpcUrl}; use the passphrase and contract ID from the same deployment`
+        : `contract ${params.contractId} was not found on RPC network ${JSON.stringify(params.rpcPassphrase)} at ${params.rpcUrl}; check that contractId and networkPassphrase refer to the same deployment`;
+    super(message);
+    this.contractId = params.contractId;
+    this.configuredPassphrase = params.configuredPassphrase;
+    this.rpcPassphrase = params.rpcPassphrase;
+    this.rpcUrl = params.rpcUrl;
+    this.reason = params.reason;
   }
 }
 
@@ -42,6 +74,54 @@ export interface TimeoutErrorParams {
   lastStatus: string;
   timeoutMs: number;
   pollIntervalMs: number;
+}
+
+
+export class SubRosaAssetValidationError extends Error {
+  readonly name = "SubRosaAssetValidationError";
+
+  constructor(readonly field: string, message: string) {
+    super(`${field}: ${message}`);
+  }
+}
+
+export type PreflightFailureKind =
+  | "rpc_error"
+  | "simulation_error"
+  | "expired_state"
+  | "contract_error"
+  | "malformed_response";
+
+export interface SubRosaPreflightErrorParams {
+  kind: PreflightFailureKind;
+  operation: string;
+  message: string;
+  simulationError?: string;
+  contractErrorCode?: number;
+  contractErrorMessage?: string;
+  restoreMinResourceFee?: bigint;
+  cause?: unknown;
+}
+
+/** Typed error for preflight/simulation failures before transaction submission. */
+export class SubRosaPreflightError extends Error {
+  readonly name = "SubRosaPreflightError";
+  readonly kind: PreflightFailureKind;
+  readonly operation: string;
+  readonly simulationError?: string;
+  readonly contractErrorCode?: number;
+  readonly contractErrorMessage?: string;
+  readonly restoreMinResourceFee?: bigint;
+
+  constructor(params: SubRosaPreflightErrorParams) {
+    super(params.message, params.cause ? { cause: params.cause } : undefined);
+    this.kind = params.kind;
+    this.operation = params.operation;
+    this.simulationError = params.simulationError;
+    this.contractErrorCode = params.contractErrorCode;
+    this.contractErrorMessage = params.contractErrorMessage;
+    this.restoreMinResourceFee = params.restoreMinResourceFee;
+  }
 }
 
 export class SubRosaTimeoutError extends Error {

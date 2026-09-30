@@ -1,8 +1,9 @@
+<!-- SPDX-License-Identifier: MIT -->
 # Integrating Sub Rosa
 
 Sub Rosa does not require users to come to the Sub Rosa demo app. The demo app
 is a showcase. The intended product surface is a Soroban contract plus
-TypeScript packages that other Stellar apps can embed.
+TypeScript packages that auction and competitive-bid apps can embed.
 
 ## Target integration
 
@@ -55,14 +56,61 @@ await client.commit({
 ```
 
 After Drand round `R` is published, any keeper or participant can submit the
-Drand signature, reveal valid entries, clear the round, and settle escrow.
+Drand signature, reveal valid bids, clear the auction, pay the operator from
+winner escrow, and refund losing escrow.
 
-## Grant scoring pilot template
+## Preflight simulation
 
-For SCF-style sealed grant scoring (multiple projects, panel judges, ranked
-receipt output), see [`examples/grant-scoring`](../examples/grant-scoring/README.md).
-It uses the same `@sub-rosa/sdk` + `@sub-rosa/tlock` commit path as above but
-models the full grant lifecycle separately from the jury demo trace.
+Before signing and submitting a state-changing call, integrators can simulate
+the transaction against Soroban RPC to see whether it is likely to succeed:
+
+```ts
+const preflight = await client.preflightCommit({
+  roundId,
+  sealed,
+  escrow,
+});
+
+if (!preflight.ok) {
+  if (preflight.error.kind === "contract_error") {
+    console.error(
+      "Contract rejected commit:",
+      preflight.error.contractErrorMessage,
+    );
+  } else {
+    console.error("Preflight failed:", preflight.error.message);
+  }
+  return;
+}
+
+console.log("Estimated fee (stroops):", preflight.fee.transactionFee);
+console.log("Min resource fee:", preflight.fee.minResourceFee?.toString());
+
+await client.commit({ roundId, sealed, escrow });
+```
+
+Each mutating `SubRosaClient` method has a matching `preflight*` helper:
+
+| Submit | Preflight |
+| --- | --- |
+| `createRound` | `preflightCreateRound` |
+| `commit` | `preflightCommit` |
+| `openReveal` | `preflightOpenReveal` |
+| `reveal` | `preflightReveal` |
+| `clear` | `preflightClear` |
+| `settle` | `preflightSettle` |
+| `void` | `preflightVoid` |
+
+Preflight results include:
+
+- `ok` — whether simulation indicates the call would succeed
+- `fee` — estimated transaction and minimum resource fees when available
+- `resources` — CPU/memory footprint estimates when available
+- `error` — typed `SubRosaPreflightError` for RPC failures, simulation errors,
+  expired contract state, or decoded Round contract error codes
+
+Existing submit methods are unchanged; preflight is optional and does not
+require live signing credentials beyond a source `publicKey` (or `secretKey`).
 
 ## Auditor identity recovery CLI
 
@@ -92,14 +140,19 @@ Output is JSON and always includes per-blob rows with either recovered identity
 or an error. Invalid required inputs return `{ "ok": false, ... }` and exit
 non-zero.
 
-## Allocation use cases
+## Primary use case
 
-- SCF-style grant allocation: judges cannot react to leaked scores
-- Hackathon judging: panel scores open together after judging closes
-- Bounty distribution: reviews and allocation inputs stay sealed
-- RFP scoring: vendors and evaluators cannot tune inputs from visible competitors
-- Sealed auctions: bids remain unreadable before close
-- DAO/community allocation: demand signals and ballots do not leak during the window
+The focused integration target is an escrow-backed sealed auction:
+
+- bids remain unreadable before close;
+- the winning bid is paid from escrow;
+- losers are refunded deterministically;
+- the operator cannot read bids early or choose who settles;
+- the final receipt is public and verifiable.
+
+Future templates can adapt the same primitive to grants, judging, RFPs, DAO
+polls, or allocation workflows, but those do not lead the current SCF
+resubmission.
 
 ## Hosted vs embedded
 

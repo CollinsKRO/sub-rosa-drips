@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Sub Rosa contributors
 // exportReceipt integration test — no network, no deploy.
 //
 // Verifies that the receipt produced by SubRosaClient.exportReceipt() includes
@@ -7,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { StrKey } from "@stellar/stellar-sdk";
+import { rpc, StrKey } from "@stellar/stellar-sdk";
 import { commitment } from "@sub-rosa/tlock";
 import { SubRosaClient } from "./client.js";
 import { verifyReceipt } from "./verify.js";
@@ -19,6 +20,13 @@ function newClient(): SubRosaClient {
     rpcUrl: "https://soroban-testnet.stellar.org",
     networkPassphrase: TESTNET,
     contractId: StrKey.encodeContract(Buffer.alloc(32)),
+    _server: {
+      getNetwork: async () => ({
+        passphrase: TESTNET,
+        protocolVersion: "23",
+      }),
+      getLedgerEntries: async () => ({ entries: [{}], latestLedger: 123 }),
+    } as unknown as rpc.Server,
   });
 }
 

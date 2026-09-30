@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Sub Rosa contributors
 // settlement-guard.test.ts
 //
 // Tests for Issue #79 — keeper duplicate-settlement suppression.
@@ -25,7 +26,7 @@ function mockRound(tag: string) {
   return {
     status: { tag },
     reveal_round: 1n,
-    reveal_deadline: BigInt(Math.floor(Date.now() / 1000) - 3600),
+    reveal_deadline: BigInt(1_700_000_000 - 3600),
     winner: tag === "Cleared" ? "GABC" : undefined,
   };
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Encrypted blob validation — size, content-type, encoding, and seal binding.
 //
 // The contract enforces a 4096-byte maximum for ciphertext (Soroban Temporary
@@ -217,17 +218,20 @@ export function validateEncryptedBlob(
   let byteLength: number;
 
   if (typeof blob === "string") {
-    // An explicit `encoding` is a claim about the blob, so it is held to: a
-    // string that is valid in the *other* encoding is still a mismatch. With
-    // no claim, hex is tried first and base64 second.
     const encoding = options?.encoding;
-    const decoded =
-      encoding === "hex"
-        ? tryDecodeHex(blob)
-        : encoding === "base64"
-          ? tryDecodeBase64(blob)
-          : tryDecodeHex(blob) ?? tryDecodeBase64(blob);
+    let hexDecoded: ReturnType<typeof tryDecodeHex> = null;
+    let b64Decoded: ReturnType<typeof tryDecodeBase64> = null;
 
+    if (encoding === "hex") {
+      hexDecoded = tryDecodeHex(blob);
+    } else if (encoding === "base64") {
+      b64Decoded = tryDecodeBase64(blob);
+    } else {
+      hexDecoded = tryDecodeHex(blob);
+      b64Decoded = hexDecoded ? null : tryDecodeBase64(blob);
+    }
+
+    const decoded = hexDecoded ?? b64Decoded;
     if (decoded) {
       rawBytes = decoded.bytes;
       byteLength = decoded.length;
@@ -235,7 +239,7 @@ export function validateEncryptedBlob(
       // Not valid hex or base64.
       add(
         "invalid_encoding",
-        `${HUMAN_LABELS[ct]} is not valid hex or base64 encoding (length=${blob.length})`,
+        `${HUMAN_LABELS[ct]} is not valid ${encoding ?? "hex or base64"} encoding (length=${blob.length})`,
       );
       return { valid: false, issues };
     }

@@ -1,11 +1,17 @@
+import { normalizeError, publicErrorMessage } from "@sub-rosa/logging/errors";
+// Copyright (c) 2026 Sub Rosa contributors
+import { createLogger, type Logger } from '@sub-rosa/logging';
+const diagnostics = createLogger("services.keeper.src.status-server");
 import http from "node:http";
 
 import type { DrandClient } from "@sub-rosa/tlock";
+import { resolveTimeContext, systemClock, systemScheduler, systemTime } from "@sub-rosa/time";
 
 import type { StatusReader } from "./status.js";
 import { buildKeeperStatus, type BuildStatusSource } from "./status.js";
 
 export interface StatusServerConfig {
+  logger?: Logger;
   host?: string;
   port?: number;
   contractId: string;
@@ -119,6 +125,7 @@ function makeRoutes(src: BuildStatusSource): Route[] {
 function healthzHandler(
   src: BuildStatusSource,
 ): (url: URL) => Promise<{ status: number; body: unknown }> {
+  const { clock } = resolveTimeContext(systemTime, src.time);
   return async () => {
     try {
       const info = await src.drand.chain().info();
@@ -133,16 +140,18 @@ function healthzHandler(
           },
           contractId: src.contractId,
           network: src.network,
-          now: new Date().toISOString(),
+          now: clock.toISOString(),
         },
       };
     } catch (e) {
+      const detail = normalizeError(e).message;
+      (src.logger ?? diagnostics).error("keeper-healthz-health-check-failed", "[keeper-healthz] health check failed:", { "detail_0": detail });
       return {
         status: 503,
         body: {
           ok: false,
-          reason: e instanceof Error ? e.message : String(e),
-          now: new Date().toISOString(),
+          reason: "health check failed",
+          now: clock.toISOString(),
         },
       };
     }
@@ -154,13 +163,14 @@ export function createStatusServer(config: StatusServerConfig): http.Server {
   const port = config.port ?? Number(process.env.KEEPER_STATUS_PORT ?? "8090");
 
   const source: BuildStatusSource = {
+    logger: config.logger,
     reader: config.reader,
     drand: config.drand,
     storeRounds: config.storeRounds,
     contractId: config.contractId,
     network: config.network,
     settleIndicator: config.settleIndicator,
-    epochMs: config.epochMs ?? Date.now(),
+    epochMs: config.epochMs ?? systemClock.nowMs(),
   };
 
   const dynamic = makeRoutes(source);
@@ -192,10 +202,12 @@ export function createStatusServer(config: StatusServerConfig): http.Server {
         .then((body) => match.handler(url, body))
         .then((r) => send(res, r.status, r.body))
         .catch((e) => {
-          send(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          (config.logger ?? diagnostics).error("request-failed", normalizeError(e));
+          send(res, 500, { error: publicErrorMessage(e) });
         });
     } catch (e) {
-      send(res, 500, { error: e instanceof Error ? e.message : String(e) });
+      (config.logger ?? diagnostics).error("request-failed", normalizeError(e));
+      send(res, 500, { error: publicErrorMessage(e) });
     }
   });
 
@@ -243,7 +255,7 @@ export function withGracefulShutdown(server: http.Server, signals: NodeJS.Signal
     if (stopping) return;
     stopping = true;
     server.close(() => process.exit(0));
-    setTimeout(() => process.exit(1), 5000).unref();
+    systemScheduler.setTimeout(() => process.exit(1), 5000);
   };
   for (const sig of signals) process.on(sig, onSig);
 

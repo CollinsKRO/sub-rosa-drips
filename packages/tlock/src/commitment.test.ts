@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Sub Rosa contributors
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -7,7 +8,9 @@ import {
   commitmentMatches,
   decodeBidPreimage,
   encodeBidPreimage,
+  fromHex,
   i128ToBeBytes,
+  isValidHex,
   toHex,
   COMMITMENT_BYTES,
   NONCE_BYTES,
@@ -94,5 +97,73 @@ test("commitmentMatches treats wrong-width inputs as a mismatch rather than thro
 test("commitmentMatches holds across the i128 boundary values", () => {
   for (const value of [0n, 1n, -1n, FROZEN_VALUE, (1n << 126n), -(1n << 126n)]) {
     assert.equal(commitmentMatches(value, FROZEN_NONCE, commitment(value, FROZEN_NONCE)), true);
+  }
+});
+
+test("fromHex decodes lowercase, uppercase, and prefixed values", () => {
+  const expected = [0xab, 0xcd, 0xef];
+  assert.deepEqual([...fromHex("abcdef")], expected);
+  assert.deepEqual([...fromHex("ABCDEF")], expected);
+  assert.deepEqual([...fromHex("0xAbCdEf")], expected);
+  assert.deepEqual([...fromHex("0XABCDEF")], expected);
+});
+
+test("fromHex accepts empty input as an empty byte array", () => {
+  assert.deepEqual([...fromHex("")], []);
+  assert.deepEqual([...fromHex("0x")], []);
+  assert.deepEqual([...fromHex("0X")], []);
+});
+
+test("fromHex rejects odd-length, non-hex, and non-string input", () => {
+  assert.throws(() => fromHex("abc"), /odd hex length/);
+  assert.throws(() => fromHex("0xabc"), /odd hex length/);
+  assert.throws(() => fromHex("0Xabc"), /odd hex length/);
+  assert.throws(() => fromHex("zz"), /invalid hex characters/);
+  assert.throws(() => fromHex("12 3"), /invalid hex characters/);
+  assert.throws(() => fromHex("12g4"), /invalid hex characters/);
+  assert.throws(() => fromHex("0x12gg"), /invalid hex characters/);
+  assert.throws(() => fromHex(123 as any), /hex must be a string/);
+  assert.throws(() => fromHex(null as any), /hex must be a string/);
+});
+
+test("isValidHex accepts valid even-length hex strings", () => {
+  assert.equal(isValidHex("abcdef"), true);
+  assert.equal(isValidHex("ABCDEF"), true);
+  assert.equal(isValidHex("0xAbCdEf"), true);
+  assert.equal(isValidHex("0XABCDEF"), true);
+  assert.equal(isValidHex(""), true);
+  assert.equal(isValidHex("0x"), true);
+  assert.equal(isValidHex("0X"), true);
+  assert.equal(isValidHex("00"), true);
+  assert.equal(isValidHex("0x1234567890abcdefABCDEF"), true);
+});
+
+test("isValidHex rejects odd-length, non-hex, and non-string inputs", () => {
+  assert.equal(isValidHex("abc"), false);
+  assert.equal(isValidHex("0xabc"), false);
+  assert.equal(isValidHex("0Xabc"), false);
+  assert.equal(isValidHex("zz"), false);
+  assert.equal(isValidHex("12 3"), false);
+  assert.equal(isValidHex("12g4"), false);
+  assert.equal(isValidHex("0x12gg"), false);
+  assert.equal(isValidHex(123 as any), false);
+  assert.equal(isValidHex(null as any), false);
+  assert.equal(isValidHex(undefined as any), false);
+  assert.equal(isValidHex({} as any), false);
+});
+
+test("toHex produces clean lowercase hex strings", () => {
+  assert.equal(toHex(new Uint8Array([0x00, 0x0f, 0xab, 0xcd, 0xef])), "000fabcdef");
+  assert.equal(toHex(new Uint8Array([])), "");
+});
+
+test("isValidHex agrees with fromHex's accept/reject decisions", () => {
+  for (const hex of ["abcdef", "ABCDEF", "0xAbCdEf", "0XABCDEF", "", "0x"]) {
+    assert.equal(isValidHex(hex), true, hex);
+    assert.doesNotThrow(() => fromHex(hex));
+  }
+  for (const hex of ["abc", "zz", "12 3", "0x12gg"]) {
+    assert.equal(isValidHex(hex), false, hex);
+    assert.throws(() => fromHex(hex));
   }
 });

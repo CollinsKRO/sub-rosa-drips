@@ -4,10 +4,18 @@
   "private": true,
   "type": "module",
   "description": "Risk-2 harness: validate tlock <-> Drand <-> on-chain BLS and generate Soroban constants",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sub-Rosa-Issue/sub-rosa-issue.git",
+    "directory": "services/drand-tools"
+  },
   "scripts": {
-    "validate": "tsx src/index.ts"
+    "validate": "tsx src/index.ts",
+    "test": "node --import tsx --test src/encode.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@sub-rosa/logging": "workspace:*",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0"
   },

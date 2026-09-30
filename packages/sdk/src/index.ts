@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export {
   SubRosaClient,
   type SubRosaClientConfig,
@@ -7,6 +8,16 @@ export {
   type ClearingRuleTag,
 } from "./client.js";
 export { normalizeRoundId, normalizeSorobanContractId } from "./ids.js";
+export {
+  type PreflightOperation,
+  type PreflightResult,
+  type PreflightSuccess,
+  type PreflightFailureResult,
+  type PreflightFeeEstimate,
+  type PreflightResourceEstimate,
+  evaluatePreflight,
+  contractErrorCode,
+} from "./preflight.js";
 export {
   createOzChannelsSubmitter,
   createOzChannelsSubmitterFromEnv,
@@ -18,11 +29,24 @@ export {
 export {
   SubRosaClientConfigError,
   SubRosaMissingReturnValueError,
+  SubRosaNetworkMismatchError,
+  SubRosaPreflightError,
   SubRosaSubmitError,
   SubRosaTimeoutError,
   SubRosaTransactionError,
+  SubRosaAssetValidationError,
 } from "./errors.js";
-export type { TimeoutErrorParams } from "./errors.js";
+export type {
+  NetworkMismatchErrorParams,
+  PreflightFailureKind,
+  SubRosaPreflightErrorParams,
+  TimeoutErrorParams,
+} from "./errors.js";
+export {
+  validateContractNetwork,
+  type ContractNetworkValidationConfig,
+  type NetworkValidationServer,
+} from "./network.js";
 
 export {
   validateEncryptedBlob,
@@ -80,12 +104,33 @@ export {
   RECEIPT_VERSION,
 } from "./receipt.js";
 export {
+  redactReceipt,
+  type RedactOptions,
+} from "./redact.js";
+export {
   verifyReceipt,
   type VerificationIssue,
   type VerificationResult,
   type VerifyOptions,
   type Severity,
 } from "./verify.js";
+
+// Round-status predicates and human-readable labels. Mirror
+// services/keeper/src/status.ts status vocab.
+export {
+  ACTIVE_ROUND_STATUSES,
+  TERMINAL_ROUND_STATUSES,
+  ERROR_ROUND_STATUSES,
+  type RoundStatusClass,
+  classifyRoundStatus,
+  isActiveRoundStatus,
+  isTerminalRoundStatus,
+  isErrorRoundStatus,
+  roundStatusLabel,
+  isKeeperRoundActive,
+  isKeeperRoundTerminal,
+  isKeeperRoundSettlementPending,
+} from "./round-status.js";
 
 // Keeper status-API response shapes. Mirror services/keeper/src/status.ts.
 export {
@@ -103,6 +148,7 @@ export {
 export {
   KeeperStatusClient,
   StatusApiError,
+  StatusJsonParseError,
   type StatusClientOptions,
   fetchKeeperStatus,
 } from "./status-client.js";

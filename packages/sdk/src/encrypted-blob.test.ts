@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Sub Rosa contributors
 // Encrypted blob validation tests.
 //
 // These tests validate the helper/schema that accepts encrypted blob payloads
@@ -232,7 +233,7 @@ test("rejects invalid base64 string (evidence ciphertext)", () => {
   );
   assert.equal(result.valid, false);
   assert.equal(result.issues[0].code, "invalid_encoding");
-  assert.match(result.issues[0].message, /not valid hex or base64/);
+  assert.match(result.issues[0].message, /not valid base64 encoding/);
 });
 
 test("accepts 0x-prefixed hex evidence ciphertext", () => {
@@ -264,6 +265,70 @@ test("rejects string with mixed valid/invalid hex characters", () => {
   );
   assert.equal(result.valid, false);
   assert.equal(result.issues[0].code, "invalid_encoding");
+});
+
+// ── Explicit encoding option tests ───────────────────────────────────────
+
+test("forced hex accepts valid hex and 0x-prefixed hex", () => {
+  const raw = u8(32);
+  const plainHex = hex(raw);
+  const prefixedHex = "0x" + plainHex;
+
+  const res1 = validateEncryptedBlob(plainHex, "evidence_ciphertext", {
+    encoding: "hex",
+  });
+  assert.equal(res1.valid, true);
+
+  const res2 = validateEncryptedBlob(prefixedHex, "evidence_ciphertext", {
+    encoding: "hex",
+  });
+  assert.equal(res2.valid, true);
+});
+
+test("forced hex rejects valid base64 strings containing non-hex characters", () => {
+  const res = validateEncryptedBlob("dGVzdA==", "evidence_ciphertext", {
+    encoding: "hex",
+  });
+  assert.equal(res.valid, false);
+  assert.equal(res.issues[0].code, "invalid_encoding");
+});
+
+test("forced base64 accepts valid base64 strings", () => {
+  const raw = u8(32);
+  const b64Str = b64(raw);
+  const res = validateEncryptedBlob(b64Str, "evidence_ciphertext", {
+    encoding: "base64",
+  });
+  assert.equal(res.valid, true);
+});
+
+test("forced base64 uses base64 decoder instead of hex", () => {
+  // "AAAA" is valid hex (2 bytes: 0xaa, 0xaa) and valid base64 (3 bytes: 0x00, 0x00, 0x00).
+  // If forced base64, decoded length is 3 bytes.
+  // With maxBytes: 2, forced hex passes (2 bytes <= 2), but forced base64 fails (3 bytes > 2).
+  const resHex = validateEncryptedBlob("AAAA", "ciphertext", {
+    encoding: "hex",
+    maxBytes: 2,
+  });
+  assert.equal(resHex.valid, true);
+
+  const resB64 = validateEncryptedBlob("AAAA", "ciphertext", {
+    encoding: "base64",
+    maxBytes: 2,
+  });
+  assert.equal(resB64.valid, false);
+  assert.equal(resB64.issues[0].code, "blob_too_large");
+});
+
+test("omitted encoding auto-detects hex first, then base64", () => {
+  const raw = u8(16);
+  const hexStr = hex(raw);
+  const resHex = validateEncryptedBlob(hexStr, "evidence_ciphertext");
+  assert.equal(resHex.valid, true);
+
+  // "dGVzdA==" is valid base64 but invalid hex
+  const resB64 = validateEncryptedBlob("dGVzdA==", "evidence_ciphertext");
+  assert.equal(resB64.valid, true);
 });
 
 // ── Invalid type ─────────────────────────────────────────────────────────
@@ -645,3 +710,29 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
   return a.every((byte, i) => byte === b[i]);
 }
+
+test("forced hex does not fall back to base64", () => {
+  const result = validateEncryptedBlob("/w==", "ciphertext", { encoding: "hex" });
+  assert.equal(result.valid, false);
+  assert.equal(result.issues[0].code, "invalid_encoding");
+  assert.match(result.issues[0].message, /not valid hex encoding/);
+});
+test("forced base64 does not fall back to hex", () => {
+  const result = validateEncryptedBlob("ff", "ciphertext", { encoding: "base64" });
+  assert.equal(result.valid, false);
+  assert.equal(result.issues[0].code, "invalid_encoding");
+  assert.match(result.issues[0].message, /not valid base64 encoding/);
+});
+test("ambiguous text uses the requested decoder for the decoded size limit", () => {
+  assert.equal(validateEncryptedBlob("deadbeef", "ciphertext", { encoding: "hex", maxBytes: 4 }).valid, true);
+  const base64 = validateEncryptedBlob("deadbeef", "ciphertext", { encoding: "base64", maxBytes: 4 });
+  assert.equal(base64.valid, false);
+  assert.equal(base64.issues[0].code, "blob_too_large");
+  assert.equal(validateEncryptedBlob("deadbeef", "ciphertext", { maxBytes: 4 }).valid, true);
+});
+test("explicit decoders accept their valid input and auto-detection accepts both", () => {
+  for (const [blob, encoding] of [["0xff", "hex"], ["/w==", "base64"]] as const) {
+    assert.equal(validateEncryptedBlob(blob, "ciphertext", { encoding }).valid, true);
+    assert.equal(validateEncryptedBlob(blob, "ciphertext").valid, true);
+  }
+});

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Sub Rosa contributors
 export {
   commitment,
   commitmentMatches,
@@ -7,6 +8,7 @@ export {
   beBytesToI128,
   toHex,
   fromHex,
+  isValidHex,
   VALUE_BYTES,
   NONCE_BYTES,
   PREIMAGE_BYTES,
@@ -25,7 +27,7 @@ export {
   type SealedPayloadHeader,
   type SealedPayloadParse,
   type SealedPayloadRejection,
-} from "./payload.js";
+} from "./ciphertext.js";
 
 export {
   generateAuditorKeypair,
@@ -49,6 +51,13 @@ export {
 export { drandSignatureToSoroban, encodeG1Soroban } from "./bls.js";
 
 export {
+  assertChainInfo,
+  assertBeacon,
+  type RawChainInfo,
+  type RawBeacon,
+} from "./validate.js";
+
+export {
   sealBid,
   openBid,
   generateNonce,
@@ -64,3 +73,17 @@ export {
   type FreshnessStatus,
   type FreshnessResult,
 } from "./freshness.js";
+
+export {
+  encodePayloadEnvelope,
+  decodePayloadEnvelope,
+  payloadCommitment,
+  sealPayload,
+  openPayload,
+  PAYLOAD_ENVELOPE_VERSION,
+  PAYLOAD_HEADER_BYTES,
+  MAX_APPLICATION_PAYLOAD_BYTES,
+  type PayloadEnvelope,
+  type SealPayloadParams,
+  type SealedPayload,
+} from "./payload.js";

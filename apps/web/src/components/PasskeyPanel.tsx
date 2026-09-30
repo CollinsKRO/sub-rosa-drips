@@ -1,5 +1,8 @@
+import { publicErrorMessage } from "@sub-rosa/logging/errors";
+// Copyright (c) 2026 Sub Rosa contributors
 import { useMemo, useState } from "react";
 import { CAP_SAFETY_COPY } from "../demo/trace";
+import { useTime } from "../lib/time";
 import {
   PASSKEY_NETWORK_PASSPHRASE,
   PASSKEY_RPC_URL,
@@ -32,6 +35,7 @@ const LINKS = [
 ];
 
 export function PasskeyPanel() {
+  const { clock } = useTime();
   const [status, setStatus] = useState<PasskeyStatus>("idle");
   const [message, setMessage] = useState<string>(
     "Create a browser passkey (Touch ID / Face ID / security key). Does not change Round agents.",
@@ -63,7 +67,7 @@ export function PasskeyPanel() {
 
   function passkeyUserId(): string {
     // passkey-kit builds WebAuthn user.id from `${user}:${time}:${random}` — must decode to ≤64 bytes.
-    return `sr-${Date.now().toString(36)}`;
+    return `sr-${clock.nowMs().toString(36)}`;
   }
 
   async function createDemoKey() {
@@ -95,7 +99,7 @@ export function PasskeyPanel() {
       );
     } catch (e) {
       setStatus("error");
-      setMessage(e instanceof Error ? e.message : String(e));
+      setMessage(publicErrorMessage(e));
     }
   }
 
@@ -121,7 +125,7 @@ export function PasskeyPanel() {
       setMessage(`Smart wallet deployed on testnet: ${created.contractId}`);
     } catch (e) {
       setStatus("error");
-      const detail = e instanceof Error ? e.message : String(e);
+      const detail = publicErrorMessage(e);
       setMessage(
         `Deploy failed: ${detail}. Try again after refresh; if it persists, sponsor funding on testnet may be missing (Create passkey alone is enough for the demo).`,
       );

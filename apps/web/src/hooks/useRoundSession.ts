@@ -1,5 +1,7 @@
+import { publicErrorMessage } from "@sub-rosa/logging/errors";
+// Copyright (c) 2026 Sub Rosa contributors
 import { Buffer } from "buffer";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getNetworkDetails,
   isConnected,
@@ -35,6 +37,8 @@ import {
 import { DEMO_TRACE } from "../demo/trace";
 import { formatCountdown, useDrandCountdown } from "./useDrandCountdown";
 import { useToast } from "../ui/Toast";
+import { useTime } from "../lib/time";
+import { shortAddr } from "../lib/format";
 
 export type ActionStatus = "idle" | "working" | "ok" | "error";
 
@@ -70,15 +74,13 @@ function emptySession(roundId: bigint | null = null): CaseSession {
 
 function initialSessions(): Record<UseCaseId, CaseSession> {
   return {
-    dao: emptySession(),
-    grants: emptySession(),
-    bounty: emptySession(),
-    allocation: emptySession(),
+    auction: emptySession(),
   };
 }
 
 export function useRoundSession(active: UseCase) {
   const toast = useToast();
+  const { clock } = useTime();
   const [address, setAddress] = useState<string | null>(null);
   const [walletStatus, setWalletStatus] = useState("Connect a funded Stellar testnet wallet.");
   const [entryValue, setEntryValue] = useState(active.defaultValue);
@@ -90,6 +92,20 @@ export function useRoundSession(active: UseCase) {
     null,
   );
   const contract = useWalletContract(address);
+  const generation = useRef(0);
+  const latestRefresh = useRef(0);
+  const mounted = useRef(true);
+  const roundIds = useRef<Record<UseCaseId, bigint | null>>({ auction: null });
+  const context = useRef({ contract, address, id: active.id });
+  context.current = { contract, address, id: active.id };
+  useEffect(() => {
+    mounted.current = true;
+    generation.current++;
+    return () => {
+      mounted.current = false;
+      generation.current++;
+    };
+  }, [contract, address, active.id]);
   const session = sessions[active.id];
   const { auditorPublicKey, commitValue, sealedCiphertext, live, log, roundId, roundCreatedAt } =
     session;
@@ -97,7 +113,7 @@ export function useRoundSession(active: UseCase) {
   const targetRound = live ? Number(live.round.reveal_round) : DEMO_TRACE.meta.revealRound;
   const drandGate = useDrandCountdown(targetRound);
   const commitSecondsRemaining = live
-    ? Math.max(0, Number(live.round.commit_deadline) - Math.floor(Date.now() / 1000))
+    ? Math.max(0, Number(live.round.commit_deadline) - clock.nowSeconds())
     : null;
   const commitClosed = commitSecondsRemaining != null && commitSecondsRemaining <= 0;
   const committedOnChain = Boolean(address && live?.bidStates[address]);
@@ -111,6 +127,10 @@ export function useRoundSession(active: UseCase) {
   }, [active.id, active.defaultValue]);
 
   function updateSession(id: UseCaseId, patch: Partial<CaseSession>) {
+    if ("roundId" in patch) {
+      roundIds.current[id] = patch.roundId ?? null;
+      generation.current++;
+    }
     setSessions((prev) => ({
       ...prev,
       [id]: { ...prev[id], ...patch },
@@ -125,17 +145,29 @@ export function useRoundSession(active: UseCase) {
   }
 
   async function refresh(targetRoundId = roundId, id = active.id) {
-    if (!contract || targetRoundId == null) return;
-    const round = await contract.get_round({ round_id: targetRoundId });
-    const bidders = await contract.get_bidders({ round_id: targetRoundId });
-    const bidStates: Record<string, BidState> = {};
-    for (const bidder of bidders.result.unwrap()) {
-      const state = await contract.get_bid_state({ round_id: targetRoundId, bidder });
-      bidStates[bidder] = state.result.unwrap();
+    if (!contract || targetRoundId == null || !mounted.current ||
+        context.current.contract !== contract || context.current.address !== address ||
+        context.current.id !== id || roundIds.current[id] !== targetRoundId) return;
+    const startedGeneration = generation.current;
+    const request = ++latestRefresh.current;
+    const isCurrent = () => mounted.current && generation.current === startedGeneration &&
+      latestRefresh.current === request && roundIds.current[id] === targetRoundId &&
+      context.current.contract === contract && context.current.address === address && context.current.id === id;
+    try {
+      const round = await contract.get_round({ round_id: targetRoundId });
+      const bidders = await contract.get_bidders({ round_id: targetRoundId });
+      const bidStates: Record<string, BidState> = {};
+      for (const bidder of bidders.result.unwrap()) {
+        const state = await contract.get_bid_state({ round_id: targetRoundId, bidder });
+        bidStates[bidder] = state.result.unwrap();
+      }
+      if (!isCurrent()) return;
+      updateSession(id, {
+        live: { round: round.result.unwrap(), bidders: bidders.result.unwrap(), bidStates },
+      });
+    } catch (error) {
+      if (isCurrent()) throw error;
     }
-    updateSession(id, {
-      live: { round: round.result.unwrap(), bidders: bidders.result.unwrap(), bidStates },
-    });
   }
 
   async function connect() {
@@ -162,7 +194,7 @@ export function useRoundSession(active: UseCase) {
       toast.dismiss(workingId);
       toast.push("success", "Wallet connected", netMsg);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
+      const msg = publicErrorMessage(error);
       setWalletStatus(msg);
       setStatus("error");
       toast.dismiss(workingId);
@@ -192,7 +224,7 @@ export function useRoundSession(active: UseCase) {
       const commitDeadline = tReveal - LIVE_COMMIT_CLOSE_BEFORE_REVEAL_SECONDS;
       const revealDeadline = tReveal + LIVE_REVEAL_WINDOW_AFTER_REVEAL_SECONDS;
       const auditor = generateAuditorKeypair();
-      const itemRef = await sha256Bytes(`${active.id}:${address}:${Date.now()}`);
+      const itemRef = await sha256Bytes(`${active.id}:${address}:${clock.nowMs()}`);
       const tx = await contract.create_round({
         operator: address,
         item_ref: Buffer.from(itemRef),
@@ -207,7 +239,7 @@ export function useRoundSession(active: UseCase) {
       updateSession(id, {
         roundId: nextRoundId,
         auditorPublicKey: auditor.publicKey,
-        roundCreatedAt: Date.now(),
+        roundCreatedAt: clock.nowMs(),
         commitValue: null,
         sealedCiphertext: null,
         live: null,
@@ -254,14 +286,14 @@ export function useRoundSession(active: UseCase) {
         throw new Error(`Round #${parsedId} is ${round.status.tag} — commit window has closed.`);
       }
       const commitDeadline = Number(round.commit_deadline);
-      const now = Math.floor(Date.now() / 1000);
+      const now = clock.nowSeconds();
       if (commitDeadline <= now) {
         throw new Error(`Round #${parsedId} commit window has already closed.`);
       }
       updateSession(id, {
         roundId: parsedId,
         auditorPublicKey: new Uint8Array(round.auditor_pubkey),
-        roundCreatedAt: Date.now(),
+        roundCreatedAt: clock.nowMs(),
         commitValue: null,
         sealedCiphertext: null,
         live: null,
@@ -385,26 +417,28 @@ export function useRoundSession(active: UseCase) {
           `Revealing bid ${i + 1} of ${pending.length}`,
           shortAddr(bidder),
         );
-        const seal = (await contract.get_seal({ round_id: roundId, bidder })).result;
-        let ciphertext: Uint8Array | null = seal ? new Uint8Array(seal.ciphertext) : null;
-        if (!ciphertext && address === bidder && sealedCiphertext) {
-          ciphertext = sealedCiphertext;
-        }
-        if (!ciphertext) {
-          skipped.push(`${shortAddr(bidder)}: seal expired or missing`);
+        try {
+          const seal = (await contract.get_seal({ round_id: roundId, bidder })).result;
+          let ciphertext: Uint8Array | null = seal ? new Uint8Array(seal.ciphertext) : null;
+          if (!ciphertext && address === bidder && sealedCiphertext) {
+            ciphertext = sealedCiphertext;
+          }
+          if (!ciphertext) {
+            skipped.push(`${shortAddr(bidder)}: seal expired or missing`);
+            continue;
+          }
+          const opened = await openBid(ciphertext, drand);
+          const revealTx = await contract.reveal({
+            round_id: roundId,
+            bidder,
+            value: opened.value,
+            nonce: Buffer.from(opened.nonce),
+          });
+          await revealTx.signAndSend();
+          revealed += 1;
+        } finally {
           toast.dismiss(stepId);
-          continue;
         }
-        const opened = await openBid(ciphertext, drand);
-        const revealTx = await contract.reveal({
-          round_id: roundId,
-          bidder,
-          value: opened.value,
-          nonce: Buffer.from(opened.nonce),
-        });
-        await revealTx.signAndSend();
-        revealed += 1;
-        toast.dismiss(stepId);
       }
       setRevealProgress(null);
       if (revealed === 0) {
@@ -468,9 +502,4 @@ export function useRoundSession(active: UseCase) {
     openAndReveal,
     refresh,
   };
-}
-
-function shortAddr(addr: string, len = 6) {
-  if (addr.length <= len * 2 + 3) return addr;
-  return `${addr.slice(0, len)}…${addr.slice(-len)}`;
 }

@@ -1,5 +1,10 @@
+import { normalizeError } from "@sub-rosa/logging/errors";
+// Copyright (c) 2026 Sub Rosa contributors
+import { createLogger, type Logger } from '@sub-rosa/logging';
+const diagnostics = createLogger("services.keeper.src.store");
 import * as fs from "fs";
 import * as path from "path";
+import { systemClock } from "@sub-rosa/time";
 
 export interface WatchedRound {
   roundId: string;
@@ -16,11 +21,49 @@ export interface StoreData {
   rounds: Record<string, WatchedRound>;
 }
 
+export type RoundIdInput = bigint | number | string;
+
+/**
+ * Numeric round-id comparator. Orders two round ids by their numeric value
+ * regardless of the input type (bigint, number, or string). Returns a negative
+ * number if `a < b`, zero if equal, and a positive number if `a > b`.
+ */
+export function compareRoundIds(a: RoundIdInput, b: RoundIdInput): number {
+  const aBig = BigInt(normalizeRoundId(a));
+  const bBig = BigInt(normalizeRoundId(b));
+  return aBig < bBig ? -1 : aBig > bBig ? 1 : 0;
+}
+
+export function normalizeRoundId(roundId: RoundIdInput): string {
+  let value: bigint;
+
+  if (typeof roundId === "bigint") {
+    value = roundId;
+  } else if (typeof roundId === "number") {
+    if (!Number.isSafeInteger(roundId)) {
+      throw new Error(`roundId must be a positive integer, got ${roundId}`);
+    }
+    value = BigInt(roundId);
+  } else {
+    const trimmed = roundId.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      throw new Error(`roundId must be a positive integer, got ${JSON.stringify(roundId)}`);
+    }
+    value = BigInt(trimmed);
+  }
+
+  if (value <= 0n) {
+    throw new Error(`roundId must be a positive integer, got ${value}`);
+  }
+
+  return value.toString();
+}
+
 export class KeeperStore {
   private readonly storePath: string;
   private data: StoreData;
 
-  constructor(storePath?: string) {
+  constructor(storePath?: string, private readonly logger: Logger = diagnostics) {
     this.storePath =
       storePath || process.env.KEEPER_STORE_PATH || ".keeper-store.json";
     this.data = this.loadStore();
@@ -38,13 +81,29 @@ export class KeeperStore {
       if (!parsed.rounds || typeof parsed.rounds !== "object") {
         return { rounds: {} };
       }
-      return parsed as StoreData;
+      const rounds: Record<string, WatchedRound> = {};
+      for (const [key, value] of Object.entries(parsed.rounds)) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          this.logger.warn("store-dropping-malformed-stored-round-entry", `[Store] Dropping malformed stored round entry ${key}: expected an object`);
+          continue;
+        }
+        const stored = value as Partial<WatchedRound>;
+        let id: string;
+        try {
+          id = normalizeRoundId(stored.roundId ?? key);
+        } catch {
+          this.logger.warn("store-dropping-malformed-stored-round-entry-2", `[Store] Dropping malformed stored round entry ${key}: non-numeric or invalid round id ${JSON.stringify(stored.roundId ?? key)}`);
+          continue;
+        }
+        rounds[id] = { ...stored, roundId: id } as WatchedRound;
+      }
+      return { rounds };
     } catch (e) {
-      console.warn(`[Store] Failed to parse ${this.storePath}. Backing up corrupted file and starting fresh.`);
+      this.logger.warn("store-failed-to-parse", `[Store] Failed to parse ${this.storePath}. Backing up corrupted file and starting fresh.`);
       try {
-        fs.renameSync(this.storePath, `${this.storePath}.corrupted.${Date.now()}`);
+        fs.renameSync(this.storePath, `${this.storePath}.corrupted.${systemClock.nowMs()}`);
       } catch (backupErr) {
-        console.error(`[Store] Could not backup corrupted file:`, backupErr);
+        this.logger.error("store-could-not-backup-corrupted-file", `[Store] Could not backup corrupted file:`, { "backupErr_0": normalizeError(backupErr) });
       }
       return { rounds: {} };
     }
@@ -59,56 +118,53 @@ export class KeeperStore {
       }
       fs.writeFileSync(this.storePath, JSON.stringify(this.data, null, 2), "utf-8");
     } catch (e) {
-      console.error(`[Store] Failed to save store to ${this.storePath}:`, e);
+      this.logger.error("store-failed-to-save-store-to", `[Store] Failed to save store to ${this.storePath}:`, { "e_0": normalizeError(e) });
     }
   }
 
-  public addRound(roundId: bigint | number | string, extra: Partial<WatchedRound> = {}): void {
-    const idStr = String(roundId);
+  public addRound(roundId: RoundIdInput, extra: Partial<WatchedRound> = {}): void {
+    const idStr = normalizeRoundId(roundId);
     if (!this.data.rounds[idStr]) {
       this.data.rounds[idStr] = {
-        roundId: idStr,
         lastStatus: "Unknown",
         retryCount: 0,
         ...extra,
+        roundId: idStr,
       };
     } else {
       // If it exists, we can optionally update its fields
       this.data.rounds[idStr] = {
         ...this.data.rounds[idStr],
         ...extra,
+        roundId: idStr,
       };
     }
     this.saveStore();
   }
 
-  public removeRound(roundId: bigint | number | string): void {
-    const idStr = String(roundId);
+  public removeRound(roundId: RoundIdInput): void {
+    const idStr = normalizeRoundId(roundId);
     if (this.data.rounds[idStr]) {
       delete this.data.rounds[idStr];
       this.saveStore();
     }
   }
 
-  public updateRound(roundId: bigint | number | string, update: Partial<WatchedRound>): void {
-    const idStr = String(roundId);
+  public updateRound(roundId: RoundIdInput, update: Partial<WatchedRound>): void {
+    const idStr = normalizeRoundId(roundId);
     if (this.data.rounds[idStr]) {
-      this.data.rounds[idStr] = { ...this.data.rounds[idStr], ...update };
+      this.data.rounds[idStr] = { ...this.data.rounds[idStr], ...update, roundId: idStr };
       this.saveStore();
     }
   }
 
-  public getRound(roundId: bigint | number | string): WatchedRound | undefined {
-    return this.data.rounds[String(roundId)];
+  public getRound(roundId: RoundIdInput): WatchedRound | undefined {
+    return this.data.rounds[normalizeRoundId(roundId)];
   }
 
   public listRounds(): WatchedRound[] {
-    // Return sorted by roundId mathematically
-    return Object.values(this.data.rounds).sort((a, b) => {
-      const aBig = BigInt(a.roundId);
-      const bBig = BigInt(b.roundId);
-      return aBig < bBig ? -1 : aBig > bBig ? 1 : 0;
-    });
+    // Return sorted by roundId numerically, regardless of id type
+    return Object.values(this.data.rounds).sort((a, b) => compareRoundIds(a.roundId, b.roundId));
   }
 
   public getRawData(): StoreData {

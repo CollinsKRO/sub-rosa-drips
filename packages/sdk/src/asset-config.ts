@@ -1,3 +1,5 @@
+import { normalizeError } from "@sub-rosa/logging/errors";
+// SPDX-License-Identifier: MIT
 import { StrKey } from "@stellar/stellar-sdk";
 
 export class AssetConfigError extends Error {
@@ -128,10 +130,12 @@ export function validateAssetConfig(
 
   const decimals = validateNumber(raw.decimals, "decimals");
   if (decimals !== undefined) {
-    if (decimals < 0 || decimals > MAX_TOKEN_DECIMALS) {
+    const maxDecimals =
+      type === "native" ? MAX_STROOPS_DECIMALS : MAX_TOKEN_DECIMALS;
+    if (decimals < 0 || decimals > maxDecimals) {
       throw new AssetConfigError(
         "decimals",
-        `decimals must be 0-${MAX_TOKEN_DECIMALS}, got ${decimals}`,
+        `decimals must be 0-${maxDecimals}, got ${decimals}`,
       );
     }
     config.decimals = decimals;
@@ -158,7 +162,7 @@ export function validateAssetConfigs(input: unknown[]): AssetConfig[] {
       if (e instanceof AssetConfigError) {
         throw new AssetConfigError(
           `[${i}].${e.field}`,
-          e.message,
+          normalizeError(e).message,
         );
       }
       throw e;
@@ -213,6 +217,10 @@ export const ASSET_FIXTURES = {
       type: "sac",
       contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
       decimals: 255,
+    },
+    nativeInvalidDecimals: {
+      type: "native",
+      decimals: 8,
     },
     negativeDecimals: {
       type: "sac",

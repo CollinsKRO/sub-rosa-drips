@@ -1,5 +1,7 @@
+// Copyright (c) 2026 Sub Rosa contributors
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createFakeTime } from "@sub-rosa/time";
 
 import {
   buildKeeperStatus,
@@ -8,6 +10,8 @@ import {
   type BuildStatusSource,
 } from "./status.js";
 import type { WatchedRound } from "./store.js";
+
+const TEST_NOW_SECONDS = createFakeTime(1_700_000_000_000).clock.nowSeconds();
 
 // ---------------------------------------------------------------------------
 // Stubs
@@ -51,6 +55,8 @@ function drandDown() {
 function baseRound(
   overrides: Record<string, unknown> & { status?: string },
 ) {
+  const { clock } = createFakeTime(1_700_000_000_000);
+  const nowSeconds = clock.nowSeconds();
   const clearingRuleTag =
     (overrides.clearingRule as "HighestBid" | "LowestBid" | undefined) ??
     "HighestBid";
@@ -63,11 +69,11 @@ function baseRound(
     ),
     commit_deadline: BigInt(
       (overrides.commitDeadline as number | bigint | undefined) ??
-        Math.floor(Date.now() / 1000) + 3600,
+        nowSeconds + 3600,
     ),
     reveal_deadline: BigInt(
       (overrides.revealDeadline as number | bigint | undefined) ??
-        Math.floor(Date.now() / 1000) + 7200,
+        nowSeconds + 7200,
     ),
     bidders: (overrides.bidders ?? []) as string[],
     winner: (overrides.winner ?? null) as string | null,
@@ -154,7 +160,7 @@ describe("buildKeeperStatus — empty state", () => {
 
 describe("buildRoundStatus — pending round", () => {
   it("reports awaiting-drand when R is in the future", async () => {
-    const now = Math.floor(Date.now() / 1000);
+    const now = TEST_NOW_SECONDS;
     // Drand genesis far in the future so that R=1_000_000 has not been reached.
     const source = makeSource({
       reader: readerOk({
@@ -193,7 +199,7 @@ describe("buildRoundStatus — pending round", () => {
 
 describe("buildRoundStatus — ready-to-open", () => {
   it("reports revealReady=true when R is published and signature available", async () => {
-    const now = Math.floor(Date.now() / 1000);
+    const now = TEST_NOW_SECONDS;
     const source = makeSource({
       reader: readerOk({
         status: "Open",
@@ -227,7 +233,7 @@ describe("buildRoundStatus — ready-to-open", () => {
 
 describe("buildRoundStatus — settled round", () => {
   it("reports terminal settlement and complete phase", async () => {
-    const now = Math.floor(Date.now() / 1000);
+    const now = TEST_NOW_SECONDS;
     const source = makeSource({
       reader: readerOk({
         status: "Settled",
@@ -277,6 +283,31 @@ describe("buildKeeperStatus — upstream failure", () => {
     assert.match(String(health.reason ?? ""), /drand/);
   });
 
+  it("redacts upstream error details from health reason", async () => {
+    const secretUrl = "https://rpc.internal.example/secret-key-xyz";
+    const reader = {
+      getRound: async () => {
+        throw new Error(`connection refused: ${secretUrl}`);
+      },
+      getBidState: async () => ({ revealed_value: null }) as never,
+    };
+    const drand = {
+      chain: () => ({
+        info: async () => {
+          throw new Error(`timeout contacting ${secretUrl}`);
+        },
+      }),
+    } as never;
+
+    const health = await checkHealth(reader, drand);
+    assert.equal(health.rpc, "down");
+    assert.equal(health.drand, "down");
+    assert.equal(health.reason, "rpc: unavailable; drand: unavailable");
+    const serialized = JSON.stringify(health);
+    assert.doesNotMatch(serialized, /secret-key-xyz/);
+    assert.doesNotMatch(serialized, /rpc\.internal\.example/);
+  });
+
   it("does not crash when a tracked round is missing on-chain", async () => {
     const source = makeSource({
       reader: readerNotFound(),
@@ -293,7 +324,7 @@ describe("buildKeeperStatus — upstream failure", () => {
     assert.equal(res.rounds.length, 1);
     const r = res.rounds[0];
     assert.equal(r.status, "NotFound");
-    assert.equal(r.lastError, "rpc connection refused");
+    assert.equal(r.lastError, "The operation could not be completed. Please try again or contact support.");
     assert.equal(r.retryCount, 1);
   });
 
@@ -313,7 +344,7 @@ describe("buildKeeperStatus — upstream failure", () => {
     assert.equal(res.rounds.length, 1);
     const r = res.rounds[0];
     assert.equal(r.status, "Unknown");
-    assert.equal(r.lastError, "rpc connection refused");
+    assert.equal(r.lastError, "The operation could not be completed. Please try again or contact support.");
     assert.equal(r.retryCount, 2);
   });
 });
@@ -324,7 +355,7 @@ describe("buildKeeperStatus — upstream failure", () => {
 
 describe("buildKeeperStatus — round ordering", () => {
   it("sorts active rounds before terminal ones", async () => {
-    const now = Math.floor(Date.now() / 1000);
+    const now = TEST_NOW_SECONDS;
     const source = makeSource({
       reader: readerOk({
         status: "Open",

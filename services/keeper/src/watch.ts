@@ -1,3 +1,7 @@
+import { normalizeError } from "@sub-rosa/logging/errors";
+// Copyright (c) 2026 Sub Rosa contributors
+import { createLogger } from '@sub-rosa/logging';
+const diagnostics = createLogger("services.keeper.src.watch");
 // Watch-mode keeper — standalone entry. For a combined status-API + watch
 // process, use `serve.ts` instead.
 //
@@ -40,11 +44,11 @@ async function main() {
     secretKey: keeperSecret,
   });
   const drand = quicknet();
-  const log = (m: string) => console.log(`· ${m}`);
+  const log = (m: string) => diagnostics.info("progress", `· ${m}`);
 
   let stopping = false;
   process.on("SIGINT", () => {
-    console.log("\nwatch: SIGINT — finishing current tick then exit");
+    diagnostics.info("watch-sigint-finishing-current-tick-then-exit", "\nwatch: SIGINT — finishing current tick then exit");
     stopping = true;
   });
   process.on("SIGTERM", () => {
@@ -54,10 +58,10 @@ async function main() {
   const store = new KeeperStore();
   const settlementGuard = createSettlementGuard();
 
-  console.log("Sub Rosa watch-mode keeper");
-  console.log("· contract:", contractId);
-  console.log("· poll:    ", pollMs, "ms");
-  console.log("· Ctrl+C to stop\n");
+  diagnostics.info("sub-rosa-watch-mode-keeper", "Sub Rosa watch-mode keeper");
+  diagnostics.info("contract", "· contract:", { "contractId_0": contractId });
+  diagnostics.info("poll", "· poll:    ", { "pollMs_0": pollMs, "value2_1": "ms" });
+  diagnostics.info("ctrl-c-to-stop", "· Ctrl+C to stop\n");
 
   await runWatchLoop({
     sdk,
@@ -71,10 +75,10 @@ async function main() {
     isStopping: () => stopping,
   });
 
-  console.log("watch: stopped");
+  diagnostics.info("watch-stopped", "watch: stopped");
 }
 
 main().catch((err) => {
-  console.error("watch keeper failed:", err);
+  diagnostics.error("watch-keeper-failed", "watch keeper failed:", { "err_0": normalizeError(err) });
   process.exit(1);
 });
