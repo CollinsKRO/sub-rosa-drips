@@ -3,8 +3,8 @@ import { normalizeError } from "@sub-rosa/logging/errors";
 // Autonomous bidder agent — appraisal (x402) → seal → commit.
 //
 // The agent never uses the principal key on-chain. It verifies its session
-// mandate, pays for an appraisal, sizes a bid within the mandate caps, seals
-// with tlock, and commits via the SDK using the session secret.
+// mandate, pays for an appraisal, sizes a bid within the mandate caps, seals with tlock,
+// and commits via the SDK using the session secret.
 
 import { Keypair } from "@stellar/stellar-sdk";
 import type { Network, SettleResponse } from "@x402/core/types";
@@ -131,7 +131,7 @@ export async function runBidderAgent(config: BidderAgentConfig, dependencies: Bi
   const quotedPrice = BigInt(config.mandate.appraisalPriceStroops);
   assertAppraisalSpendAllowed(config.mandate, quotedPrice, 0n);
 
-  log(`paying appraisal (${stroopsToUsdc(quotedPrice)} USDC)…`);
+  log(`paying appraisal (${stroopsToUsdc(quotedPrice)} USDC…);
   const paidFetch = dependencies.createPaidFetch({
     secret: config.sessionSecret,
     network: config.x402Network ?? "stellar:testnet",
