@@ -196,8 +196,9 @@ pnpm mainnet:verify              # read-only — no secrets
 pnpm mainnet:micro               # dry-run checklist
 MAINNET_CONFIRM=SUB_ROSA_MAINNET OPERATOR_SECRET=S… BIDDER_SECRET=S… \
   pnpm mainnet:micro -- --execute   # optional micro commit (≤1 XLM escrow)
+pnpm mainnet:settle                 # readiness + capped, read-only dry-run
 MAINNET_CONFIRM=SUB_ROSA_MAINNET KEEPER_SECRET=S… ROUND_CONTRACT_ID=C… \
-  pnpm mainnet:settle               # keeper settle (requires readiness + confirm)
+  pnpm mainnet:settle -- --execute  # keeper settle (requires readiness + confirm)
 ```
 
 ### Mainnet launch checklist
