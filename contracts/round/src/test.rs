@@ -2,13 +2,13 @@
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, Address, Bytes, BytesN, ConversionError, Env, InvokeError, Vec,
+    token, Address, Bytes, BytesN, ConversionError, Env, InvokeError, String, Vec,
 };
 use soroban_sdk::testutils::storage::Temporary as TemporaryStorageTest;
 
 use crate::drand;
 use crate::storage::{seal_ttl_for_reveal_deadline, TEMP_THRESHOLD};
-use crate::types::{ClearingRule, DataKey, Error, GlobalConfig, Status};
+use crate::types::{ClearingRule, DataKey, Error, GlobalConfig, RoundAssetConfig, Status};
 use crate::{SubRosaRound, SubRosaRoundClient};
 
 // ── Dummy fixture (no BLS) — only for tests that never call open_reveal ──────
@@ -140,6 +140,7 @@ fn drand_round(f: &Fixture, operator: &Address, commit_deadline: u64, reveal_dea
         &commit_deadline,
         &reveal_deadline,
         &Bytes::from_array(&f.env, b"auditor"),
+        &native_xlm(&f.env),
     )
 }
 
@@ -159,6 +160,19 @@ fn b32(env: &Env, byte: u8) -> BytesN<32> {
     BytesN::from_array(env, &[byte; 32])
 }
 
+/// Native XLM asset config, the default for tests that don't exercise SAC
+/// binding. `create_round` takes it on every call but does not itself validate
+/// the fields, so tests that only need a well-formed round pass this.
+pub fn native_xlm(env: &Env) -> RoundAssetConfig {
+    RoundAssetConfig {
+        asset_type: String::from_str(env, "native"),
+        contract_id: String::from_str(env, ""),
+        code: String::from_str(env, "XLM"),
+        decimals: 7,
+        issuer: String::from_str(env, ""),
+    }
+}
+
 fn open_round(f: &Fixture, operator: &Address) -> u64 {
     f.client.create_round(
         operator,
@@ -168,6 +182,7 @@ fn open_round(f: &Fixture, operator: &Address) -> u64 {
         &1_500,
         &2_500,
         &Bytes::from_array(&f.env, b"auditor-pubkey"),
+        &native_xlm(&f.env),
     )
 }
 
@@ -294,7 +309,7 @@ fn create_round_rejects_commit_after_reveal() {
     let operator = Address::generate(&f.env);
     let res = f.client.try_create_round(
         &operator, &b32(&f.env, 1), &2_000, &ClearingRule::HighestBid,
-        &2_000, &2_500, &Bytes::from_array(&f.env, b"a"),
+        &2_000, &2_500, &Bytes::from_array(&f.env, b"a"), &native_xlm(&f.env),
     );
     assert!(res.is_err());
 }
@@ -305,7 +320,7 @@ fn create_round_rejects_deadline_in_past() {
     let operator = Address::generate(&f.env);
     let res = f.client.try_create_round(
         &operator, &b32(&f.env, 1), &2_000, &ClearingRule::HighestBid,
-        &500, &2_500, &Bytes::from_array(&f.env, b"a"),
+        &500, &2_500, &Bytes::from_array(&f.env, b"a"), &native_xlm(&f.env),
     );
     assert!(res.is_err());
 }
@@ -995,6 +1010,7 @@ fn full_lifecycle_real_drand_signature() {
     let id = f.client.create_round(
         &operator, &b32(&f.env, 0xAB), &VEC_ROUND, &ClearingRule::HighestBid,
         &commit_deadline, &reveal_deadline, &Bytes::from_array(&f.env, b"auditor"),
+        &native_xlm(&f.env),
     );
 
     let alice = funded_bidder(&f, 1_000);
