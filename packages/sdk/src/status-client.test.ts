@@ -1,109 +1,142 @@
-import { describe, it } from "node:test";
-import assert from "node:assert/strict";
+import { StatusClient } from "./status-client";
+import { NotReady } from "./status";
+import { Clock } from "@sub-rosa/time";
 
-import {
-  KeeperStatusClient,
-  StatusApiError,
-  StatusJsonParseError,
-} from "./status-client.js";
-import type { KeeperStatusResponse } from "./status.js";
-
-const SAMPLE_STATUS: KeeperStatusResponse = {
-  contractId: "C123",
-  network: "testnet",
-  uptimeSeconds: 42,
-  rounds: [],
-  health: {
-    rpc: "ok",
-    drand: "ok",
-    checkedAt: "2026-01-01T00:00:00.000Z",
-  },
-  now: "2026-01-01T00:00:00.000Z",
+// Mock fetch
+const mockFetch = (response: Response | Promise<Response>) => {
+  global.fetch = jest.fn(() => response);
 };
 
-function mockFetch(body: string, status = 200): typeof fetch {
-  return async () =>
-    new Response(body, {
-      status,
-      headers: { "content-type": "application/json" },
-    });
-}
-
-describe("KeeperStatusClient successful JSON parsing", () => {
-  it("aborts a request after the configured timeout", async () => {
-    const client = new KeeperStatusClient({ baseURL: "http://keeper.test", timeoutMs: 1, fetchImpl: async (_url, init) => new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason))) });
-    await assert.rejects(() => client.getStatus(), /timed out/i);
-  });
-  it("returns valid successful JSON unchanged", async () => {
-    const client = new KeeperStatusClient({
-      baseURL: "http://keeper.test",
-      fetchImpl: mockFetch(JSON.stringify(SAMPLE_STATUS)),
-    });
-    const status = await client.getStatus();
-    assert.deepEqual(status, SAMPLE_STATUS);
-  });
-
-  it("rejects empty successful JSON bodies", async () => {
-    const client = new KeeperStatusClient({
-      baseURL: "http://keeper.test",
-      fetchImpl: mockFetch("   "),
-    });
-    await assert.rejects(
-      () => client.getStatus(),
-      (error: unknown) => {
-        assert.ok(error instanceof StatusJsonParseError);
-        assert.equal(error.status, 200);
-        return true;
-      },
-    );
-  });
-
-  it("rejects malformed successful JSON bodies", async () => {
-    const client = new KeeperStatusClient({
-      baseURL: "http://keeper.test",
-      fetchImpl: mockFetch("{not-json"),
-    });
-    await assert.rejects(
-      () => client.getStatus(),
-      (error: unknown) => {
-        assert.ok(error instanceof StatusJsonParseError);
-        assert.match(error.message, /invalid JSON/i);
-        return true;
-      },
-    );
-  });
+// Fake clock
+const createFakeClock = (now: number): Clock => ({
+  now: () => now,
 });
 
-describe("KeeperStatusClient non-success responses", () => {
-  it("preserves typed StatusApiError for non-2xx JSON errors", async () => {
-    const client = new KeeperStatusClient({
-      baseURL: "http://keeper.test",
-      fetchImpl: mockFetch(JSON.stringify({ error: "round not found" }), 404),
-    });
-    await assert.rejects(
-      () => client.getRound(7),
-      (error: unknown) => {
-        assert.ok(error instanceof StatusApiError);
-        assert.equal(error.status, 404);
-        assert.equal(error.data.error, "round not found");
-        return true;
-      },
-    );
+describe("StatusClient", () => {
+  const contractId = "test-contract";
+  const keeperUrl = "http://localhost:3000";
+  const timeoutMs = 1000;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
   });
 
-  it("preserves StatusApiError when non-2xx bodies are malformed JSON", async () => {
-    const client = new KeeperStatusClient({
-      baseURL: "http://keeper.test",
-      fetchImpl: mockFetch("not-json", 503),
+  describe("getStatus", () => {
+    it("returns live snapshot on successful response", async () => {
+      const snapshot = {
+        roundId: "1",
+        contractId,
+        data: { key: "value" },
+      };
+      mockFetch(
+        Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(snapshot),
+        } as Response)
+      );
+
+      const client = new StatusClient({
+        keeperUrl,
+        contractId,
+        timeoutMs,
+      });
+
+      const status = await client.getStatus();
+      expect(status).toEqual(snapshot);
     });
-    await assert.rejects(
-      () => client.getHealth(),
-      (error: unknown) => {
-        assert.ok(error instanceof StatusApiError);
-        assert.equal(error.status, 503);
-        assert.equal(error.data.error, "invalid JSON body");
-        return true;
-      },
-    );
+
+    it("returns not-ready on timeout and drops previous snapshot", async () => {
+      mockFetch(
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Timeout")), timeoutMs + 100)
+        )
+      );
+
+      const fakeClock = createFakeClock(0);
+      const client = new StatusClient({
+        keeperUrl,
+        contractId,
+        timeoutMs,
+        clock: fakeClock,
+      });
+
+      // Simulate previous snapshot
+      client["snapshot"] = {
+        roundId: "0",
+        contractId,
+        data: { key: "old" },
+      };
+
+      const status = await client.getStatus();
+      expect(status).toBeInstanceOf(NotReady);
+      expect(client["snapshot"]).toBeUndefined();
+    });
+
+    it("returns not-ready on mismatched contractId", async () => {
+      const snapshot = {
+        roundId: "1",
+        contractId: "wrong-contract",
+        data: { key: "value" },
+      };
+      mockFetch(
+        Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(snapshot),
+        } as Response)
+      );
+
+      const client = new StatusClient({
+        keeperUrl,
+        contractId,
+        timeoutMs,
+      });
+
+      const status = await client.getStatus();
+      expect(status).toBeInstanceOf(NotReady);
+    });
+
+    it("returns not-ready on invalid response body", async () => {
+      mockFetch(
+        Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ invalid: "body" }),
+        } as Response)
+      );
+
+      const client = new StatusClient({
+        keeperUrl,
+        contractId,
+        timeoutMs,
+      });
+
+      const status = await client.getStatus();
+      expect(status).toBeInstanceOf(NotReady);
+    });
+
+    it("strips userinfo from keeper URL", async () => {
+      const snapshot = {
+        roundId: "1",
+        contractId,
+        data: { key: "value" },
+      };
+      mockFetch(
+        Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(snapshot),
+        } as Response)
+      );
+
+      const client = new StatusClient({
+        keeperUrl: "http://user:pass@localhost:3000",
+        contractId,
+        timeoutMs,
+      });
+
+      await client.getStatus();
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/status",
+        expect.anything()
+      );
+    });
   });
 });

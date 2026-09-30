@@ -154,6 +154,8 @@ async function main() {
   const drand = quicknet();
   const nonce = generateNonce();
   const sealed = await sealBid({
+    contractId,
+    bidderId: bidderKp.publicKey(),
     value: bid,
     nonce,
     round: revealRound,

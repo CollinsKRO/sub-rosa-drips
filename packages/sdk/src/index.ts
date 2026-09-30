@@ -28,12 +28,14 @@ export {
 } from "./submitter.js";
 export {
   SubRosaClientConfigError,
+  SubRosaPaginationError,
   SubRosaMissingReturnValueError,
   SubRosaNetworkMismatchError,
   SubRosaPreflightError,
   SubRosaSubmitError,
   SubRosaTimeoutError,
   SubRosaTransactionError,
+  SubRosaAssetValidationError,
 } from "./errors.js";
 export type {
   NetworkMismatchErrorParams,
@@ -96,6 +98,7 @@ export {
   parseReceipt,
   networkFingerprint,
   type RoundReceipt,
+  type RoundReceiptEvent,
   type BidReceiptEntry,
   RECEIPT_VERSION,
 } from "./receipt.js";
@@ -103,6 +106,14 @@ export {
   redactReceipt,
   type RedactOptions,
 } from "./redact.js";
+export {
+  verifyReceiptEvents,
+  RECEIPT_EVENT_ERROR_CODES,
+  type ReceiptEventIssue,
+  type ReceiptEventErrorCode,
+  type ReceiptEventsVerifyOptions,
+  type ReceiptEventsVerifyResult,
+} from "./receipt-events.js";
 export {
   verifyReceipt,
   type VerificationIssue,
@@ -123,6 +134,11 @@ export {
   isTerminalRoundStatus,
   isErrorRoundStatus,
   roundStatusLabel,
+  type RoundPhase,
+  ROUND_PHASES,
+  ROUND_PHASE_LABELS,
+  roundPhaseLabel,
+  isRoundPhase,
   isKeeperRoundActive,
   isKeeperRoundTerminal,
   isKeeperRoundSettlementPending,
@@ -148,6 +164,16 @@ export {
   type StatusClientOptions,
   fetchKeeperStatus,
 } from "./status-client.js";
+
+// Canonical Round contract event surface (generated-bindings event snapshot
+// + lifecycle ordering), re-exported so consumers read the event knowledge
+// from the bindings package rather than restating it.
+export {
+  expectedRoundEventSequence,
+  ROUND_EVENT_LIFECYCLE_ORDER,
+  ROUND_EVENT_PHASE_BY_NAME,
+  ROUND_EVENT_PHASE_RANK,
+} from "@sub-rosa/round-bindings/event-snapshot";
 
 // Re-export the generated contract types so consumers get spec-accurate shapes
 // from a single import surface.

@@ -93,16 +93,34 @@ function checkLifecycle(value: unknown, issues: string[]): void {
     requireString(event.detail, `${path}.detail`, issues);
     requireString(event.status, `${path}.status`, issues);
   });
+
+  // Canonical shape: exactly one settle phase, and it must be the last event.
+  const phases = lifecycle.map((event) =>
+    isRecord(event) && typeof event.phase === "string" ? event.phase : null,
+  );
+  const settleCount = phases.filter((p) => p === "settle").length;
+  if (settleCount === 0) {
+    issues.push("lifecycle must include a settle phase");
+  } else if (settleCount > 1) {
+    issues.push("lifecycle must include exactly one settle phase");
+  }
+  if (phases.length > 0 && phases[phases.length - 1] !== "settle") {
+    issues.push("lifecycle must end with the settle phase");
+  }
 }
 
 function checkBidders(value: unknown, issues: string[]): string[] {
   const bidders = requireNonEmptyArray(value, "bidders", issues);
   if (!bidders) return [];
 
-  return bidders.flatMap((value, index) => {
+  const labels: string[] = [];
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+
+  bidders.forEach((value, index) => {
     const path = `bidders[${index}]`;
     const bidder = requireRecord(value, path, issues);
-    if (!bidder) return [];
+    if (!bidder) return;
 
     requireString(bidder.label, `${path}.label`, issues);
     requireString(bidder.address, `${path}.address`, issues);
@@ -114,15 +132,27 @@ function checkBidders(value: unknown, issues: string[]): string[] {
     requireBoolean(bidder.valid, `${path}.valid`, issues);
     requireBoolean(bidder.winner, `${path}.winner`, issues);
 
-    return typeof bidder.label === "string" && bidder.label.trim() !== ""
-      ? [bidder.label]
-      : [];
+    if (typeof bidder.label === "string" && bidder.label.trim() !== "") {
+      if (seen.has(bidder.label)) duplicates.add(bidder.label);
+      seen.add(bidder.label);
+      labels.push(bidder.label);
+    }
   });
+
+  if (duplicates.size > 0) {
+    issues.push(
+      `bidders must not contain duplicate labels: ${[...duplicates].join(", ")}`,
+    );
+  }
+
+  return labels;
 }
 
-function checkAgents(value: unknown, issues: string[]): void {
+function checkAgents(value: unknown, bidderLabels: string[], issues: string[]): void {
   const agents = requireNonEmptyArray(value, "agents", issues);
   if (!agents) return;
+
+  const agentNames = new Set<string>();
 
   agents.forEach((value, index) => {
     const path = `agents[${index}]`;
@@ -132,6 +162,9 @@ function checkAgents(value: unknown, issues: string[]): void {
     requireString(agent.name, `${path}.name`, issues);
     requireString(agent.principal, `${path}.principal`, issues);
     requireString(agent.sessionKey, `${path}.sessionKey`, issues);
+
+    // Commit hash is required for every agent in the canonical trace.
+    requireString(agent.commitTx, `${path}.commitTx`, issues);
 
     const mandate = requireRecord(agent.mandate, `${path}.mandate`, issues);
     if (mandate) {
@@ -161,19 +194,71 @@ function checkAgents(value: unknown, issues: string[]): void {
       requireNumber(x402.priceUsdc, `${path}.x402.priceUsdc`, issues);
       requireBoolean(x402.settled, `${path}.x402.settled`, issues);
     }
+
+    if (typeof agent.name === "string" && agent.name.trim() !== "") {
+      agentNames.add(agent.name);
+    }
   });
+
+  // Every bidder must have a matching agent record and vice versa.
+  for (const label of bidderLabels) {
+    if (!agentNames.has(label)) {
+      issues.push(`bidder "${label}" has no matching agent record`);
+    }
+  }
+  for (const name of agentNames) {
+    if (!bidderLabels.includes(name)) {
+      issues.push(`agent "${name}" has no matching bidder record`);
+    }
+  }
 }
 
-function checkKeeper(value: unknown, issues: string[]): void {
+function checkKeeper(value: unknown, bidderLabels: string[], issues: string[]): void {
   const keeper = requireRecord(value, "keeper", issues);
   if (!keeper) return;
 
   requireNumber(keeper.drandRound, "keeper.drandRound", issues);
   requireBoolean(keeper.blsVerifiedOnChain, "keeper.blsVerifiedOnChain", issues);
-  requireNonEmptyArray(keeper.reveals, "keeper.reveals", issues)?.forEach(
-    (reveal, index) => requireString(reveal, `keeper.reveals[${index}]`, issues),
-  );
+
+  const reveals = requireNonEmptyArray(keeper.reveals, "keeper.reveals", issues);
+  if (reveals) {
+    const revealSet = new Set<string>();
+    const duplicates = new Set<string>();
+    reveals.forEach((reveal, index) => {
+      requireString(reveal, `keeper.reveals[${index}]`, issues);
+      if (typeof reveal === "string" && reveal.trim() !== "") {
+        if (revealSet.has(reveal)) duplicates.add(reveal);
+        revealSet.add(reveal);
+      }
+    });
+
+    if (duplicates.size > 0) {
+      issues.push(
+        `keeper.reveals must not contain duplicates: ${[...duplicates].join(", ")}`,
+      );
+    }
+
+    // Every bidder must appear exactly once in the reveal results.
+    for (const label of bidderLabels) {
+      if (!revealSet.has(label)) {
+        issues.push(`keeper.reveals omit bidder "${label}"`);
+      }
+    }
+    for (const reveal of revealSet) {
+      if (!bidderLabels.includes(reveal)) {
+        issues.push(`keeper.reveals include unknown bidder "${reveal}"`);
+      }
+    }
+  }
+
   requireString(keeper.clearWinner, "keeper.clearWinner", issues);
+  if (
+    typeof keeper.clearWinner === "string" &&
+    keeper.clearWinner.trim() !== "" &&
+    !bidderLabels.includes(keeper.clearWinner)
+  ) {
+    issues.push(`keeper.clearWinner "${keeper.clearWinner}" is not a bidder`);
+  }
   requireNumber(keeper.contractBalanceFinal, "keeper.contractBalanceFinal", issues);
 }
 
@@ -218,8 +303,8 @@ export function assertDemoTrace(value: unknown): asserts value is DemoTrace {
     checkMeta(trace.meta, issues);
     checkLifecycle(trace.lifecycle, issues);
     const bidderLabels = checkBidders(trace.bidders, issues);
-    checkAgents(trace.agents, issues);
-    checkKeeper(trace.keeper, issues);
+    checkAgents(trace.agents, bidderLabels, issues);
+    checkKeeper(trace.keeper, bidderLabels, issues);
     checkSettlement(trace.settlement, issues);
     checkAuditor(trace.auditor, bidderLabels, issues);
   }

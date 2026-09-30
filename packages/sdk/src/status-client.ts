@@ -1,128 +1,85 @@
-// SPDX-License-Identifier: MIT
-// Fetch helpers for the keeper status API. These are intentionally tiny
-// wrappers over `fetch` so they work unchanged in Node 22+, the browser, or a
-// Lambda — no `axios`, no generated client. Status endpoints are read-only
-// and return stable typed JSON (see ../status.ts).
+import { Clock } from "@sub-rosa/time";
+import { Status, NotReady, Snapshot } from "./status";
 
-import type {
-  KeeperHealthResponse,
-  KeeperStatusResponse,
-  KeeperRoundStatusView,
-  ApiError,
-} from "./status.js";
-
-export interface StatusClientOptions {
-  baseURL: string;
-  fetchImpl?: typeof fetch;
-  headers?: Record<string, string>;
-  timeoutMs?: number;
+interface StatusClientConfig {
+  keeperUrl: string;
+  contractId: string;
+  timeoutMs: number;
+  clock?: Clock;
 }
 
-export class StatusApiError extends Error {
-  status: number;
-  data: ApiError;
-  constructor(status: number, data: ApiError) {
-    super(data.error ?? `status api returned ${status}`);
-    this.name = "StatusApiError";
-    this.status = status;
-    this.data = data;
-  }
-}
+export class StatusClient {
+  private readonly keeperUrl: string;
+  private readonly contractId: string;
+  private readonly timeoutMs: number;
+  private readonly clock: Clock;
+  private snapshot?: Snapshot;
 
-/** Raised when a successful HTTP response body is empty or not valid JSON. */
-export class StatusJsonParseError extends Error {
-  readonly name = "StatusJsonParseError";
-  readonly status: number;
-
-  constructor(status: number, options?: ErrorOptions) {
-    super(`status api returned ${status} with invalid JSON body`, options);
-    this.status = status;
-  }
-}
-
-function fullURL(base: string, path: string): string {
-  const trimmed = base.replace(/\/+$/, "");
-  const clean = path.startsWith("/") ? path : `/${path}`;
-  return `${trimmed}${clean}`;
-}
-
-async function parseErrorBody(res: Response): Promise<ApiError> {
-  const text = await res.text();
-  if (!text.trim()) return { error: `status api returned ${res.status}` };
-  try {
-    return JSON.parse(text) as ApiError;
-  } catch {
-    return { error: "invalid JSON body" };
-  }
-}
-
-async function parseSuccessBody<T>(res: Response): Promise<T> {
-  const text = await res.text();
-  if (!text.trim()) {
-    throw new StatusJsonParseError(res.status);
-  }
-  try {
-    return JSON.parse(text) as T;
-  } catch (cause) {
-    throw new StatusJsonParseError(res.status, { cause });
-  }
-}
-
-export class KeeperStatusClient {
-  readonly baseURL: string;
-  readonly fetchImpl: typeof fetch;
-  readonly headers: Record<string, string>;
-  readonly timeoutMs: number;
-
-  constructor(opts: StatusClientOptions) {
-    this.baseURL = opts.baseURL;
-    this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
-    this.headers = opts.headers ?? {};
-    this.timeoutMs = opts.timeoutMs ?? 10_000;
-    if (!this.fetchImpl) {
-      throw new Error(
-        "No global fetch found. Pass `fetchImpl` in StatusClientOptions.",
-      );
-    }
+  constructor(config: StatusClientConfig) {
+    this.keeperUrl = new URL(config.keeperUrl).toString(); // Normalize and strip userinfo
+    this.contractId = config.contractId;
+    this.timeoutMs = config.timeoutMs;
+    this.clock = config.clock ?? { now: () => Date.now() };
   }
 
-  async getStatus(signal?: AbortSignal): Promise<KeeperStatusResponse> {
-    return this.getJSON<KeeperStatusResponse>("/status", signal);
-  }
-
-  async getRound(roundId: number | bigint | string, signal?: AbortSignal): Promise<KeeperRoundStatusView> {
-    return this.getJSON<KeeperRoundStatusView>(`/status/rounds/${roundId}`, signal);
-  }
-
-  async getHealth(signal?: AbortSignal): Promise<KeeperHealthResponse> {
-    return this.getJSON<KeeperHealthResponse>("/status/health", signal);
-  }
-
-  async healthz(signal?: AbortSignal): Promise<{ ok: boolean; [k: string]: unknown }> {
-    return this.getJSON<{ ok: boolean; [k: string]: unknown }>("/healthz", signal);
-  }
-
-  async getJSON<T>(path: string, callerSignal?: AbortSignal): Promise<T> {
-    const url = fullURL(this.baseURL, path);
+  async getStatus(): Promise<Status> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error("keeper status request timed out")), this.timeoutMs);
-    const forwardAbort = () => controller.abort(callerSignal?.reason);
-    callerSignal?.addEventListener("abort", forwardAbort, { once: true });
+    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+
     try {
-      const res = await this.fetchImpl(url, { method: "GET", headers: { Accept: "application/json", ...this.headers }, signal: controller.signal });
-      if (!res.ok) {
-        const body = await parseErrorBody(res);
-        throw new StatusApiError(res.status, body);
+      const response = await fetch(`${this.keeperUrl}/status`, {
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        return new NotReady();
       }
-      return parseSuccessBody<T>(res);
-    } finally {
-      clearTimeout(timer);
-      callerSignal?.removeEventListener("abort", forwardAbort);
+
+      const body: unknown = await response.json();
+      const snapshot = this.parseSnapshot(body);
+
+      if (!this.isValidSnapshot(snapshot)) {
+        return new NotReady();
+      }
+
+      this.snapshot = snapshot;
+      return snapshot;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error instanceof Error && error.name === "AbortError") {
+        this.snapshot = undefined; // Drop previous snapshot on timeout
+        return new NotReady();
+      }
+      this.snapshot = undefined;
+      return new NotReady();
     }
   }
-}
 
-// Convenience — one-shot status fetch without constructing a client.
-export async function fetchKeeperStatus(baseURL: string): Promise<KeeperStatusResponse> {
-  return new KeeperStatusClient({ baseURL }).getStatus();
+  private parseSnapshot(body: unknown): Snapshot | null {
+    if (
+      typeof body === "object" &&
+      body !== null &&
+      "roundId" in body &&
+      "contractId" in body &&
+      "data" in body
+    ) {
+      return {
+        roundId: String((body as Record<string, unknown>).roundId),
+        contractId: String((body as Record<string, unknown>).contractId),
+        data: (body as Record<string, unknown>).data as Record<string, unknown>,
+      };
+    }
+    return null;
+  }
+
+  private isValidSnapshot(snapshot: Snapshot | null): snapshot is Snapshot {
+    if (!snapshot) return false;
+    return (
+      snapshot.contractId === this.contractId &&
+      snapshot.roundId !== undefined
+    );
+  }
 }

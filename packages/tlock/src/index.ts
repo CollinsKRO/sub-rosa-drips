@@ -18,7 +18,16 @@ export {
   auditorPublicKey,
   sealIdentity,
   openIdentity,
+  sealIdentityForBidder,
+  openIdentityForBidder,
+  decodeIdentityBlob,
+  isIdentityBound,
+  IdentityBindingError,
+  IDENTITY_BLOB_VERSION,
   type AuditorKeypair,
+  type SealIdentityForBidderParams,
+  type OpenIdentityForBidderParams,
+  type OpenedIdentity,
 } from "./auditor.js";
 
 export {

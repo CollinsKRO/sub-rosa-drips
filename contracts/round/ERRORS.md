@@ -27,8 +27,7 @@ stay in sync with `contracts/round/src/types.rs`.
 | --- | --- |
 | 1–4     | Initialization & state lookup |
 | 10–22   | Lifecycle & timing |
-| 30–39   | Cryptography & validation |
-| 40–42   | Seal-round window (issue #376) |
+| 30–40   | Cryptography & validation |
 
 ## Initialization & state lookup (1–4)
 
@@ -57,7 +56,7 @@ stay in sync with `contracts/round/src/types.rs`.
 | 21 | `NotVoidable` | `void` | Round is past the `Open` status, or `now <= reveal_deadline + VOID_GRACE` (3600 s). | The round cannot be voided from its current state, or the grace window has not elapsed yet. | Either complete the normal lifecycle, or wait until `reveal_deadline + 1 hour` and try `void` again. |
 | 22 | `WrongStatus` | `commit` | `round.status != Status::Open`. | A bid can only be submitted to a round in the Open status. | Start a new round; a Revealing/Cleared/Settled/Voided round no longer accepts commits. |
 
-## Cryptography & validation (30–39)
+## Cryptography & validation (30–40)
 
 | Code | Variant | Raised by | Trigger | User-facing message | Suggested next action |
 | ---: | --- | --- | --- | --- | --- |
@@ -74,6 +73,39 @@ stay in sync with `contracts/round/src/types.rs`.
 | 40 | `SealRoundTooEarly` | `commit` | `seal_round < round.reveal_round`: the seal names a Drand round before the one the auction committed to open. | The sealed bid is locked to the wrong Drand round. | Reseal the bid to the round published in the `created` event (`reveal_round`) and commit again; no escrow was moved. |
 | 41 | `SealRoundTooLate` | `commit` | `seal_round > round.reveal_round`: the seal names a Drand round after the one the auction committed to open. | The sealed bid is locked to the wrong Drand round. | Reseal the bid to the round published in the `created` event (`reveal_round`) and commit again; no escrow was moved. |
 | 42 | `InvalidSealRoundZero` | `create_round`, `commit` | `reveal_round == 0` at round creation, or `seal_round == 0` at commit. A zero or overflowing round can never be published by the Drand chain. | The Drand round number is malformed. | Use a positive round the quicknet chain can actually publish (`genesis + period × R` must fit in `u64`); check before locking escrow. |
+
+| 40 | `InvalidCursor` | `get_bidders_page` | Cursor has the wrong length, version, checksum, scope, or bounds. | The bidder cursor is invalid for this round and contract. | Restart with no cursor; pass each returned token unchanged. |
+
+## Bidder cursor encoding (v1)
+
+`get_bidders_page(round_id, cursor, limit)` takes `Option<Bytes>`: `None`
+starts an enumeration. Pass the returned `next_cursor` unchanged while
+`has_more` is true. The terminal page has `has_more = false` and
+`next_cursor = None`; an empty round returns an empty terminal page.
+Limits remain 1–100 (`InvalidLimit`, code 39).
+
+The 41-byte token contains version `0x01`, next unread zero-based offset
+(4 bytes, big endian), snapshot bidder count (4 bytes, big endian), then a
+32-byte SHA-256 checksum. The checksum preimage is the canonical Soroban XDR
+`ScVal` tuple `(current_contract_address, round_id: u64, header: Bytes)`,
+where `header` is the first nine bytes. This binds the token to its contract,
+round, offset, and count. Invalid tokens return `InvalidCursor` (40), rather
+than silently clamping an offset. Continuation offsets must be positive and
+at most the snapshot count, which must not exceed the current bidder count.
+
+The bidder index is append-only, ordered by first commit; overwriting a bid
+does not add another index entry. The first page fixes the count. Later
+commits are excluded from that enumeration; restart to include them. Cursors
+are deterministic and replayable for the same snapshot. The checksum detects
+corruption and foreign scope; it is public, not an authentication mechanism
+or a claim that a caller has read earlier pages. This changes the pagination
+ABI from numeric offsets; deploy matching contract and generated bindings
+together. Existing deployed contracts require their previous SDK version.
+
+The SDK iterator follows `has_more`, checks stable counts and forward progress,
+and rejects repeated bidder IDs before yielding the affected page with
+`SubRosaPaginationError` (`reason = "repeated_bidder"`). Contract and SDK tests
+consume the same ordered addresses in `fixtures/bidder-pagination.txt`.
 
 ## How to use this table
 

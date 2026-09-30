@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
@@ -11,11 +12,11 @@ import {
   parseTypesRs,
 } from "./check-round-errors.mjs";
 
-const SCRIPT_PATH = new URL(
+const SCRIPT_PATH = fileURLToPath(new URL(
   "check-round-errors.mjs",
   import.meta.url,
-).pathname;
-const PROJECT_ROOT = new URL("..", import.meta.url).pathname;
+));
+const PROJECT_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 function runScript(args = [], options = {}) {
   return execFileSync("node", [SCRIPT_PATH, ...args], {
@@ -45,7 +46,7 @@ describe("parseTypesRs", () => {
       "utf-8",
     );
     const variants = parseTypesRs(content);
-    assert.equal(variants.length, 30);
+    assert.equal(variants.length, 28);
     assert.deepEqual(
       variants.find((v) => v.name === "CommitClosed"),
       { name: "CommitClosed", code: 10 },
@@ -60,7 +61,7 @@ describe("parseErrorsMd", () => {
       "utf-8",
     );
     const variants = parseErrorsMd(content);
-    assert.equal(variants.length, 30);
+    assert.equal(variants.length, 28);
     assert.deepEqual(
       variants.find((v) => v.name === "InvalidLimit"),
       { name: "InvalidLimit", code: 39 },
@@ -72,8 +73,8 @@ describe("check-round-errors script", () => {
   it("passes against the real repo sources", () => {
     const result = runScript();
     assert.match(result, /PASS\s+types\.rs and ERRORS\.md list the same error codes\./);
-    assert.match(result, /types\.rs : 30 variants/);
-    assert.match(result, /ERRORS\.md: 30 rows/);
+    assert.match(result, /types\.rs : 28 variants/);
+    assert.match(result, /ERRORS\.md: 28 rows/);
   });
 
   it("fails when ERRORS.md is missing a variant", () => {

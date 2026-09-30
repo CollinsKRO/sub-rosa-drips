@@ -23,7 +23,7 @@ import {
 } from "./keeper.js";
 import type { SettlementGuard } from "./settlement-guard.js";
 import type { KeeperLogger } from "./keeper.js";
-import { KeeperStore } from "./store.js";
+import { DEFAULT_LEASE_MS, generateLeaseOwner, KeeperStore } from "./store.js";
 
 export interface RunWatchLoopParams {
   sdk: SubRosaClient;
@@ -37,6 +37,47 @@ export interface RunWatchLoopParams {
   isStopping: () => boolean;
   /** Injectable wall clock and scheduler. Default: systemTime. */
   time?: PartialTimeContext;
+  /** Lease owner recorded for rounds this loop claims. Default: generated. */
+  owner?: string;
+  /** Lease duration in ms. Default: {@link DEFAULT_LEASE_MS}. */
+  leaseMs?: number;
+}
+
+/**
+ * Transport failures leave the round exactly as it was, so the lease stays
+ * with its owner until it expires. A contract that answered and rejected the
+ * step is definitive: the attempt cannot succeed, so the round goes back to
+ * the queue for whoever picks it up next.
+ */
+const TRANSIENT_ERROR_MARKERS = [
+  "timeout",
+  "timed out",
+  "ETIMEDOUT",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "fetch failed",
+  "socket hang up",
+  "aborted",
+];
+
+const CONTRACT_ERROR_MARKERS = [
+  "HostError",
+  "Error(Contract",
+  "Error(WasmVm",
+  "ended with status",
+];
+
+export function isDefinitiveContractFailure(error: unknown): boolean {
+  const normalized = normalizeError(error);
+  if (normalized.retryable) return false;
+  const message = normalized.message;
+  if (TRANSIENT_ERROR_MARKERS.some((marker) => message.toLowerCase().includes(marker.toLowerCase()))) {
+    return false;
+  }
+  return CONTRACT_ERROR_MARKERS.some((marker) => message.includes(marker));
 }
 
 const bigintReplacer = (_k: string, v: unknown): unknown =>
@@ -63,6 +104,20 @@ async function resolveRoundIds(reader: SubRosaClient): Promise<bigint[]> {
   });
 }
 
+export function validateStoredCheckpoint(
+  rounds: { contractId?: string; network?: string; roundId?: string }[],
+  config: { contractId: string; network: string }
+): void {
+  for (const r of rounds) {
+    if (r.contractId && r.contractId !== config.contractId) {
+      throw new Error(`checkpoint contract mismatch: stored contract ${r.contractId} does not match config contract ${config.contractId}`);
+    }
+    if (r.network && r.network !== config.network) {
+      throw new Error(`checkpoint network mismatch: stored network ${r.network} does not match config network ${config.network}`);
+    }
+  }
+}
+
 export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
   const {
     sdk,
@@ -75,11 +130,18 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
     settlementGuard,
     isStopping,
     time,
+    owner: explicitOwner,
+    leaseMs,
   } = params;
+
+  // Load the checkpoint / stored rounds and validate before claiming work
+  const storedRounds = store.listRounds();
+  validateStoredCheckpoint(storedRounds, { contractId, network });
 
   const resolvedTime = resolveTimeContext(systemTime, time);
   const { clock, scheduler } = resolvedTime;
   const deps: KeeperDeps = { sdk, drand, log, time: resolvedTime };
+  const owner = explicitOwner?.trim() || generateLeaseOwner();
 
   while (!isStopping()) {
     const started = clock.nowMs();
@@ -107,6 +169,21 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
     for (const storedRound of activeRounds) {
       const roundId = BigInt(storedRound.roundId);
       if (isStopping()) break;
+      // One watcher per round: whoever holds the lease reveals and settles,
+      // everybody else skips the tick instead of submitting alongside it.
+      const claim = store.claimRound(roundId, {
+        owner,
+        contractId,
+        network,
+        ...(leaseMs !== undefined ? { leaseMs } : {}),
+      });
+      if (!claim.claimed) {
+        log(
+          `[round ${roundId}] lease held by ${claim.lease.owner} until ` +
+            `${clock.toISOString(claim.lease.expiresAtMs)} — skipping tick`,
+        );
+        continue;
+      }
       try {
         const canSettleCheck = settlementGuard.canSettle(roundId);
         if (!canSettleCheck.allowed) {
@@ -137,6 +214,12 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
           lastAction: acted ? summarizeTick(tick) : storedRound.lastAction,
         });
 
+        if (!active) {
+          // Terminal success: the step is done, so the round goes back to the
+          // queue instead of waiting out the lease.
+          store.releaseLease(roundId, { owner, contractId, network });
+        }
+
         if (active || acted) {
           log(
             `[round ${roundId}] ${summarizeTick(tick)}` +
@@ -154,6 +237,15 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
           retryCount: (stored?.retryCount ?? 0) + 1,
           lastError: normalizeError(e).message,
         });
+        if (isDefinitiveContractFailure(e)) {
+          store.releaseLease(roundId, { owner, contractId, network });
+          log(`[round ${roundId}] lease released after definitive contract failure`);
+        } else {
+          log(
+            `[round ${roundId}] lease kept until ` +
+              `${clock.toISOString(claim.lease.expiresAtMs)} — ${normalizeError(e).message}`,
+          );
+        }
       }
     }
 

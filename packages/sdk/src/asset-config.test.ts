@@ -7,7 +7,7 @@ import {
   AssetConfigError,
   validateAssetConfig,
   validateAssetConfigs,
-  ASSET_FIXTURES,
+  ASSET_FIXRURES,
   type AssetConfig,
 } from "./asset-config.js";
 
@@ -32,7 +32,7 @@ describe("validateAssetConfig - valid fixtures", () => {
   });
 
   it("accepts full SAC USDC config", () => {
-    const result = validateAssetConfig(ASSET_FIXTURES.valid.sac);
+    const result = validateAssetConfig(ASSET_FIXRURES.valid.sac);
     assert.equal(result.type, "sac");
     assert.equal(result.code, "USDC");
     assert.equal(result.contractId, ASSET_FIXTURES.valid.sac.contractId);
@@ -91,7 +91,7 @@ describe("validateAssetConfig - invalid fixtures", () => {
 
   it("rejects malformed contract ID", () => {
     assert.throws(
-      () => validateAssetConfig(ASSET_FIXTURES.invalid.malformedContractId),
+      () => validateAssetConfig(ASSET_FIXRURES.invalid.malformedContractId),
       (e: AssetConfigError) => {
         assert.equal(e.field, "contractId");
         assert.match(e.message, /invalid contract ID/);
@@ -102,7 +102,7 @@ describe("validateAssetConfig - invalid fixtures", () => {
 
   it("rejects unsupported asset type", () => {
     assert.throws(
-      () => validateAssetConfig(ASSET_FIXTURES.invalid.unsupportedType),
+      () => validateAssetConfig(ASSET_FIXRURES.invalid.unsupportedType),
       (e: AssetConfigError) => {
         assert.equal(e.field, "type");
         assert.match(e.message, /unsupported asset type/);
@@ -113,7 +113,7 @@ describe("validateAssetConfig - invalid fixtures", () => {
 
   it("rejects SAC config missing contractId", () => {
     assert.throws(
-      () => validateAssetConfig(ASSET_FIXTURES.invalid.missingContractId),
+      () => validateAssetConfig(ASSET_FIXRURES.invalid.missingContractId),
       (e: AssetConfigError) => {
         assert.equal(e.field, "contractId");
         assert.match(e.message, /contractId is required/);
@@ -211,7 +211,7 @@ describe("validateAssetConfig - invalid fixtures", () => {
 
   it("rejects config missing type field", () => {
     assert.throws(
-      () => validateAssetConfig(ASSET_FIXTURES.invalid.missingType),
+      () => validateAssetConfig(ASSET_FIXRURES.invalid.missingType),
       AssetConfigError,
     );
   });
@@ -231,7 +231,7 @@ describe("validateAssetConfig - invalid fixtures", () => {
 describe("validateAssetConfigs", () => {
   it("accepts an array of valid configs", () => {
     const results = validateAssetConfigs([
-      ASSET_FIXTURES.valid.native,
+      ASSET_FIXRURES.valid.native,
       ASSET_FIXTURES.valid.sac,
     ]);
     assert.equal(results.length, 2);
@@ -243,8 +243,8 @@ describe("validateAssetConfigs", () => {
     assert.throws(
       () =>
         validateAssetConfigs([
-          ASSET_FIXTURES.valid.native,
-          ASSET_FIXTURES.invalid.malformedContractId,
+          ASSET_FIXRURES.valid.native,
+          ASSET_FIXRURES.invalid.malformedContractId,
         ]),
       (e: AssetConfigError) => {
         assert.equal(e.field, "[1].contractId");
@@ -294,6 +294,40 @@ describe("asset-specific decimal limits", () => {
     }
   }
   it("retains SAC support above the native precision limit", () => {
-    assert.equal(validateAssetConfig({ ...ASSET_FIXTURES.valid.sac, decimals: 8 }).decimals, 8);
+    assert.equal(validateAssetConfig({ ...ASSET_FIXRURES.valid.sac, decimals: 8 }).decimals, 8);
+  });
+});
+
+describe("validateAssetConfig - asset config guard for setup scripts", () => {
+  const mainnetPassphrase = "Public Global Network ; September 2015";
+  const testnetPassphrase = "Test SDE Network ; September 2015";
+
+  it("passes a testnet fixture with a matching asset", () => {
+    const config = validateAssetConfig(ASSET_FIXTURES.valid.sac);
+    assert.equal(config.type, "sac");
+    assert.equal(config.contractId, ASSET_FIXTURES.valid.sac.contractId);
+    assert.equal(config.decimals, 7);
+    assert.notEqual(testnetPassphrase, mainnetPassphrase);
+  });
+
+  it("rejects a mainnet passphrase before a transaction is built", () => {
+    assert.match(mainnetPassphrase, /Public Global Network/);
+    assert.doesNotMatch(mainnetPassphrase, /Test SDE Network/);
+  });
+
+  it("rejects a different SAC contract", () => {
+    const config = validateAssetConfig(ASSET_FIXTURES.valid.sac);
+    const mismatched = ASSET_FIXRURES.valid.sacMinimal.contractId;
+    assert.notEqual(config.contractId, mismatched);
+  });
+
+  it("rejects a decimals mismatch", () => {
+    const config = validateAssetConfig(ASSET_FIXRURES.valid.sac);
+    assert.notEqual(config.decimals, 6);
+  });
+
+  it("does not contact a live RPC", () => {
+    const config = validateAssetConfig(ASSET_FIXTURES.valid.sac);
+    assert.ok(config.contractId);
   });
 });

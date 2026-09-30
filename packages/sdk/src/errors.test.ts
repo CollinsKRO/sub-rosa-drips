@@ -135,7 +135,7 @@ describe("SubRosaTimeoutError", () => {
 const BASE_CONFIG = {
   rpcUrl: "https://example.com",
   networkPassphrase: "Test SDF Network ; September 2015",
-  contractId: "CCW67TSA3JH6KABMZAWOS6J2GKY6BKBJ5TKQAMM6P3EXZ7OAFM2TJ5BQ",
+  contractId: "CDAZ5AJPVCJ6R3BQUPYISBSWV77HZ52T7YFWZGTVEEEFW5FVHZAK2JIM",
 };
 
 describe("SubRosaClientConfig validation", () => {

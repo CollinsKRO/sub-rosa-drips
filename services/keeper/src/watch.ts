@@ -14,13 +14,15 @@ const diagnostics = createLogger("services.keeper.src.watch");
 //   WATCH_ROUND_IDS     optional explicit list: "1,2,5" or "1-10"
 //   WATCH_FROM          first round id when auto-discovering (default 1)
 //   WATCH_MAX_ROUNDS    max rounds to probe (default 64)
+//   KEEPER_OWNER        optional lease owner id (default: generated per run)
+//   KEEPER_LEASE_MS     round lease duration (default 120000)
 
 import { Keypair } from "@stellar/stellar-sdk";
 import { SubRosaClient } from "@sub-rosa/sdk";
 import { quicknet } from "@sub-rosa/tlock";
 
 import { createSettlementGuard } from "./settlement-guard.js";
-import { KeeperStore } from "./store.js";
+import { generateLeaseOwner, KeeperStore, parseLeaseMs } from "./store.js";
 import { runWatchLoop } from "./watch-loop.js";
 
 function reqEnv(name: string): string {
@@ -73,6 +75,8 @@ async function main() {
     store,
     settlementGuard,
     isStopping: () => stopping,
+    owner: process.env.KEEPER_OWNER?.trim() || generateLeaseOwner(),
+    leaseMs: parseLeaseMs(process.env.KEEPER_LEASE_MS),
   });
 
   diagnostics.info("watch-stopped", "watch: stopped");

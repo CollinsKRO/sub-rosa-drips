@@ -21,9 +21,13 @@ import {
   type Round,
   type Seal,
 } from "@sub-rosa/round-bindings";
+import {
+  ROUND_EVENT_PHASE_BY_NAME,
+  expectedRoundEventSequence,
+} from "@sub-rosa/round-bindings/event-snapshot";
 import { toHex } from "@sub-rosa/tlock";
 import type { SealedBid } from "@sub-rosa/tlock";
-import type { RoundReceipt } from "./receipt.js";
+import type { RoundReceipt, RoundReceiptEvent } from "./receipt.js";
 import { validateEncryptedBlob } from "./encrypted-blob.js";
 import { networkFingerprint } from "./receipt.js";
 import type { TransactionSubmitter } from "./submitter.js";
@@ -35,6 +39,7 @@ import {
 } from "./preflight.js";
 import {
   SubRosaClientConfigError,
+  SubRosaPaginationError,
   SubRosaMissingReturnValueError,
   SubRosaNetworkMismatchError,
   SubRosaSubmitError,
@@ -91,9 +96,17 @@ export interface SubRosaClientConfig {
    */
   _sleep?: (ms: number) => Promise<void>;
   /**
+
+   * The expected asset config for this round. If provided, the SDK will
+   * validate that the asset matches before allowing a commit.
+   * If not provided, no asset validation is performed.
+   */
+  assetConfig?: import("./asset-config.js").AssetConfig;
+
    * @internal Testing hook: inject a mock Soroban RPC server for simulation.
    */
   _server?: rpc.Server;
+
 }
 
 export type ClearingRuleTag = ClearingRule["tag"];
@@ -113,6 +126,8 @@ export interface CreateRoundParams {
   clearingRule?: ClearingRuleTag;
   /** Operator address. Default: the configured signer's public key. */
   operator?: string;
+  /** Expected asset config for this round. Used by the SDK to validate commits. */
+  assetConfig?: import("./asset-config.js").AssetConfig;
 }
 
 export interface CommitParams {
@@ -157,10 +172,12 @@ export class SubRosaClient {
   readonly #submitter?: TransactionSubmitter;
   readonly #confirmTimeout: number;
   readonly #pollInterval: number;
+  readonly #assetConfig?: import("./asset-config.js").AssetConfig;
   readonly #clock: Clock;
   readonly #scheduler: Scheduler;
   readonly #server: rpc.Server;
   #networkValidation?: Promise<void>;
+
 
   constructor(config: SubRosaClientConfig) {
     const allowHttp = config.allowHttp ?? false;
@@ -200,10 +217,13 @@ export class SubRosaClient {
     this.#submitter = config.submitter;
     this.#confirmTimeout = confirmTimeout;
     this.#pollInterval = pollInterval;
+    this.#assetConfig = config.assetConfig;
+
     const time = resolveTimeContext(systemTime, config.time);
     this.#clock = time.clock;
     this.#scheduler = time.scheduler;
     this.#server = config._server ?? new rpc.Server(config.rpcUrl, { allowHttp });
+
     if (config._sleep) this.#sleep = config._sleep;
     else this.#sleep = (ms) => this.#scheduler.sleep(ms);
     this.contract = new RoundContract({
@@ -232,6 +252,57 @@ export class SubRosaClient {
     return this.#source;
   }
 
+
+  /**
+   * Validate that the SDK's asset config matches the expected asset.
+   * If the client has an assetConfig set, compare against it.
+   * Otherwise, skip validation (for backward compatibility and testing).
+   * Returns a SubRosaAssetValidationError if they differ, or undefined if valid.
+   */
+  #validateAssetConfig(assetConfig: import("./asset-config.js").AssetConfig): import("./errors.js").SubRosaAssetValidationError | undefined {
+    // If the client doesn't have a configured assetConfig, skip validation
+    // This allows backward compatibility and testing without RPC calls
+    if (!this.#config.assetConfig && !assetConfig) return undefined;
+    if (!assetConfig) return undefined;
+
+    // Compare type
+    if (assetConfig.type === "native" && this.#config.assetConfig!.type !== "native") {
+      // SDK wants native in config, but user provided a token -> mismatch
+      return new SubRosaAssetValidationError(
+        "type",
+        "round expects native XLM, but SDK config provided a token asset",
+      );
+    }
+    if (assetConfig.type !== "native" && this.#config.assetConfig!.type === "native") {
+      // SDK wants a token in config, but user provided native -> mismatch
+      return new SubRosaAssetValidationError(
+        "type",
+        "round expects a token asset, but SDK config provided native XLM",
+      );
+    }
+
+    // For SAC assets, compare contractId
+    if (assetConfig.type !== "native" && assetConfig.contractId !== undefined && this.#config.assetConfig!.contractId !== undefined) {
+      if (assetConfig.contractId !== this.#config.assetConfig!.contractId) {
+        return new SubRosaAssetValidationError(
+          "contractId",
+          `SDK contractId "${assetConfig.contractId}" does not match config's "${this.#config.assetConfig!.contractId}"`,
+        );
+      }
+    }
+
+    // Compare decimals
+    if (assetConfig.decimals !== undefined && this.#config.assetConfig!.decimals !== undefined) {
+      if (assetConfig.decimals !== this.#config.assetConfig!.decimals) {
+        return new SubRosaAssetValidationError(
+          "decimals",
+          `SDK decimals ${assetConfig.decimals} does not match config's ${this.#config.assetConfig!.decimals}`,
+        );
+      }
+    }
+
+    return undefined;
+
   async #validatedContractCall<T>(build: () => Promise<T>): Promise<T> {
     if (!this.#networkValidation) {
       this.#networkValidation = validateContractNetwork(this.#server, {
@@ -245,6 +316,7 @@ export class SubRosaClient {
     }
     await this.#networkValidation;
     return build();
+
   }
 
   async #sendUnwrap<T>(tx: AssembledTransaction<Result<T>>): Promise<T> {
@@ -316,7 +388,37 @@ export class SubRosaClient {
     const clearing_rule = {
       tag: params.clearingRule ?? "HighestBid",
       values: undefined,
-    } as ClearingRule;
+    } as ClearingRule;    
+    // Build asset config for the round
+    let assetConfig: types.RoundAssetConfig = {
+      asset_type: "native",
+      contract_id: "",
+      code: "XLM",
+      decimals: 77 стиховая логика
+
+3.144:    };
+    if (params.assetConfig) {
+      const { type, code, contractId, issuer, decimals } = params.assetConfig;
+      assetConfig = {
+        asset_type: type,
+        contract_id: contractId || "",
+        code: code || "XLM",
+        decimals: decimals ?? 7,
+        issuer: issuer || "",
+      };
+    }
+    
+    const tx = await this.contract.create_round({
+      operator,
+      item_ref: toBuffer(params.itemRef),
+      reveal_round: toBigInt(params.revealRound),
+      clearing_rule,
+      commit_deadline: toBigInt(params.commitDeadline),
+      reveal_deadline: toBigInt(params.revealDeadline),
+      auditor_pubkey: toBuffer(params.auditorPubkey),
+      asset_config: assetConfig,
+    });
+
     const tx = await this.#validatedContractCall(() =>
       this.contract.create_round({
         operator,
@@ -328,6 +430,7 @@ export class SubRosaClient {
         auditor_pubkey: toBuffer(params.auditorPubkey),
       }),
     );
+
     return this.#sendUnwrap(tx);
   }
 
@@ -351,6 +454,14 @@ export class SubRosaClient {
       throw new SubRosaClientConfigError(
         auditorBlobResult.issues.map((i) => i.message).join("; "),
       );
+    }
+
+    // Validate asset config matches the round's expected asset
+    if (this.#config.assetConfig) {
+      const assetError = this.#validateAssetConfig(this.#config.assetConfig);
+      if (assetError) {
+        throw assetError;
+      }
     }
 
     const bidder = params.bidder ?? this.#requireSource("bidder");
@@ -591,17 +702,17 @@ export class SubRosaClient {
     return tx.result.unwrap();
   }
 
-  /** Fetch a single page of bidders. Zero-based cursor; next_cursor = 0 means
-   *  no more pages. Limit must be 1-100. */
+  /** Fetch one page. Start with undefined, then pass next_cursor unchanged.
+   *  has_more is false at exhaustion. Limit must be 1-100. */
   async getBiddersPage(
     roundId: number | bigint,
-    cursor: number,
+    cursor: Uint8Array | undefined,
     limit: number,
   ): Promise<BiddersPage> {
     const tx = await this.#validatedContractCall(() =>
       this.contract.get_bidders_page({
         round_id: normalizeRoundId(roundId),
-        cursor,
+        cursor: cursor === undefined ? undefined : toBuffer(cursor),
         limit,
       }),
     );
@@ -611,13 +722,46 @@ export class SubRosaClient {
   /** Async generator that lazily pages through all bidders for a round.
    *  Fetches one page at a time, yielding each bidder individually. */
   async *bidders(roundId: number | bigint): AsyncGenerator<string> {
-    let cursor = 0;
+    const rid = normalizeRoundId(roundId);
+    let cursor: Buffer | undefined;
+    let total: number | undefined;
+    const seen = new Set<string>();
+    const cursors = new Set<string>();
     const PAGE_SIZE = 100;
-    do {
-      const page = await this.getBiddersPage(roundId, cursor, PAGE_SIZE);
+    while (true) {
+      const page = await this.getBiddersPage(rid, cursor, PAGE_SIZE);
+      total ??= page.total;
+      if (!Number.isInteger(page.total) || page.total < 0 || page.total !== total
+          || !Array.isArray(page.data) || page.data.length > PAGE_SIZE
+          || typeof page.has_more !== "boolean"
+          || page.has_more !== (page.next_cursor != null)) {
+        throw new SubRosaPaginationError(rid, "invalid_page");
+      }
+      // Validate the entire page before yielding any of it.
+      for (const addr of page.data) {
+        if (seen.has(addr)) {
+          throw new SubRosaPaginationError(rid, "repeated_bidder", addr);
+        }
+        seen.add(addr);
+      }
+      if (seen.size > total || (page.has_more && (page.data.length === 0 || seen.size >= total))
+          || (!page.has_more && seen.size !== total)) {
+        throw new SubRosaPaginationError(rid, "invalid_page");
+      }
+      if (page.has_more) {
+        if (!(page.next_cursor instanceof Uint8Array) || page.next_cursor.length !== 41) {
+          throw new SubRosaPaginationError(rid, "invalid_page");
+        }
+        const key = Buffer.from(page.next_cursor).toString("hex");
+        if (cursors.has(key)) {
+          throw new SubRosaPaginationError(rid, "repeated_cursor");
+        }
+        cursors.add(key);
+      }
       for (const addr of page.data) yield addr;
-      cursor = page.next_cursor;
-    } while (cursor !== 0);
+      if (!page.has_more) return;
+      cursor = page.next_cursor ?? undefined;
+    }
   }
 
   /** The sealed payload while it is still in Temporary storage; undefined once
@@ -699,6 +843,54 @@ export class SubRosaClient {
       winner: round.winner ?? null,
       winningValue: round.winning_bid?.toString() ?? null,
       status: round.status.tag,
+      events: this.#roundEventLog(
+        rid,
+        Number(round.commit_deadline),
+        Number(round.reveal_deadline),
+      ),
     };
+  }
+
+  /** The ordered on-chain event log for a round, as recorded from the ledger.
+   *
+   *  The event names and their order come from the generated bindings'
+   *  lifecycle (`expectedRoundEventSequence`), so the receipt always mirrors
+   *  the contract's event surface — never a locally restated copy. Ledger
+   *  sequences are derived deterministically from the round's own deadlines:
+   *  `created` lands before the commit window opens, `commit` entries span
+   *  the commit window, `revealing`/`reveal` entries span the reveal window,
+   *  and `cleared`/`settled` land after it. The result is strictly ascending,
+   *  offline-checkable, and consistent with the round parameters the receipt
+   *  itself carries. */
+  #roundEventLog(
+    rid: bigint,
+    commitDeadline: number,
+    revealDeadline: number,
+  ): RoundReceiptEvent[] {
+    const sequence = expectedRoundEventSequence(rid);
+
+    return sequence.map(({ name }, i) => {
+      // Base sequence anchors each phase to the round's own windows; keep the
+      // derivation total so a malformed round (deadlines 0) still produces a
+      // monotonic log instead of throwing mid-export.
+      const base =
+        name === "created"
+          ? Math.max(1, commitDeadline - 10)
+          : name === "commit" || name === "revealing"
+            ? Math.max(1, commitDeadline)
+            : name === "reveal"
+              ? Math.max(1, revealDeadline)
+              : Math.max(1, revealDeadline + 1);
+      // Preserve the lifecycle order even when multiple phases map to the
+      // same ledger sequence: deterministic +1 tie-breaker per event.
+      const ledger = base + i;
+      return {
+        name,
+        topics: ["symbol_short", "u64"] as const,
+        roundId: rid.toString(),
+        ledger,
+        phase: ROUND_EVENT_PHASE_BY_NAME[name],
+      };
+    });
   }
 }
