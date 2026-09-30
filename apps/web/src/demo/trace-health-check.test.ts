@@ -91,3 +91,29 @@ test("checksum fails when a required milestone is removed from lifecycle", () =>
   assert.ok(!result.ok);
   assert.ok(result.ok === false && result.missing.includes("open_reveal"));
 });
+
+test("demo trace contains no secret seeds", () => {
+  const json = JSON.stringify(DEMO_TRACE);
+  assert.ok(
+    !/\bS[A-Z2-7]{55}\b/.test(json),
+    "Demo trace must never contain secret seeds",
+  );
+});
+
+test("health check rejects a demo trace containing an injected secret seed", () => {
+  const FAKE_SEED = "SBGWGH5QWWZ2WKKG24YCQAL35EWB64L35KAGL3E7N7H5K3T4K5K3T4K5";
+  const taintedTrace = structuredClone(DEMO_TRACE) as unknown as {
+    agents: Array<{ sessionKey: string }>;
+  };
+  taintedTrace.agents[0].sessionKey = FAKE_SEED;
+
+  assert.throws(
+    () => assertDemoTrace(taintedTrace),
+    (error: unknown) => {
+      assert.ok(error instanceof DemoTraceHealthCheckError);
+      assert.ok(error.issues.some((i) => i.includes("must not contain a secret seed")));
+      return true;
+    },
+  );
+});
+

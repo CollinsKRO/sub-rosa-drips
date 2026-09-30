@@ -26,6 +26,7 @@ const EXPECTED_EXPORTS = [
   "SubRosaMissingReturnValueError",
   "SubRosaNetworkMismatchError",
   "SubRosaPreflightError",
+  "SubRosaSessionMismatchError",
   "SubRosaSubmitError",
   "SubRosaTimeoutError",
   "SubRosaTransactionError",
@@ -65,6 +66,7 @@ const EXPECTED_EXPORTS = [
   "validateAssetConfigs",
   "validateEncryptedBlob",
   "validateContractNetwork",
+  "validatePasskeySession",
   "verifyReceipt",
   "verifySettledRoundProof",
 ];

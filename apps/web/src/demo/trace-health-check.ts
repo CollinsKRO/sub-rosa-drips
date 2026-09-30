@@ -210,11 +210,30 @@ function checkAuditor(
   });
 }
 
+function checkNoSecretSeeds(value: unknown, path: string, issues: string[]): void {
+  if (typeof value === "string") {
+    if (/\bS[A-Z2-7]{55}\b/.test(value)) {
+      issues.push(`${path} must not contain a secret seed`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, i) => checkNoSecretSeeds(item, `${path}[${i}]`, issues));
+    return;
+  }
+  if (isRecord(value)) {
+    for (const [k, v] of Object.entries(value)) {
+      checkNoSecretSeeds(v, `${path}.${k}`, issues);
+    }
+  }
+}
+
 export function assertDemoTrace(value: unknown): asserts value is DemoTrace {
   const issues: string[] = [];
   const trace = requireRecord(value, "trace", issues);
 
   if (trace) {
+    checkNoSecretSeeds(trace, "trace", issues);
     checkMeta(trace.meta, issues);
     checkLifecycle(trace.lifecycle, issues);
     const bidderLabels = checkBidders(trace.bidders, issues);

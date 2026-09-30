@@ -31,20 +31,25 @@ export {
   SubRosaMissingReturnValueError,
   SubRosaNetworkMismatchError,
   SubRosaPreflightError,
+  SubRosaSessionMismatchError,
   SubRosaSubmitError,
   SubRosaTimeoutError,
   SubRosaTransactionError,
 } from "./errors.js";
 export type {
   NetworkMismatchErrorParams,
+  NetworkMismatchReason,
   PreflightFailureKind,
   SubRosaPreflightErrorParams,
   TimeoutErrorParams,
 } from "./errors.js";
 export {
   validateContractNetwork,
+  validatePasskeySession,
   type ContractNetworkValidationConfig,
   type NetworkValidationServer,
+  type PasskeySessionBinding,
+  type SessionBindingTarget,
 } from "./network.js";
 
 export {

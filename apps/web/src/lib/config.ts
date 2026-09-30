@@ -78,6 +78,36 @@ export function validatePublicConfig(
     }
   }
 
+  const passkeyContractId = env.VITE_PASSKEY_CONTRACT_ID;
+  const contractId = env.VITE_CONTRACT_ID;
+  if (
+    passkeyContractId &&
+    contractId &&
+    passkeyContractId.trim() !== "" &&
+    contractId.trim() !== "" &&
+    passkeyContractId.trim() !== contractId.trim()
+  ) {
+    issues.push({
+      key: "VITE_PASSKEY_CONTRACT_ID",
+      message: `VITE_PASSKEY_CONTRACT_ID (${passkeyContractId}) does not match VITE_CONTRACT_ID (${contractId}). Passkey session will be bound to a different contract than web config.`,
+    });
+  }
+
+  const passkeyPassphrase = env.VITE_PASSKEY_NETWORK_PASSPHRASE;
+  const networkPassphrase = env.VITE_NETWORK_PASSPHRASE;
+  if (
+    passkeyPassphrase &&
+    networkPassphrase &&
+    passkeyPassphrase.trim() !== "" &&
+    networkPassphrase.trim() !== "" &&
+    passkeyPassphrase.trim() !== networkPassphrase.trim()
+  ) {
+    issues.push({
+      key: "VITE_PASSKEY_NETWORK_PASSPHRASE",
+      message: `VITE_PASSKEY_NETWORK_PASSPHRASE does not match VITE_NETWORK_PASSPHRASE. Passkey session cannot commit across different networks.`,
+    });
+  }
+
   return issues;
 }
 
