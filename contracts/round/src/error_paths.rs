@@ -45,6 +45,7 @@ const ERROR_PATH_REGISTRY: &[(Error, &'static str)] = &[
     (Error::NoValidBids, "error_path_no_valid_bids"),
     (Error::RoundFull, "error_path_round_full"),
     (Error::InvalidLimit, "error_path_invalid_limit"),
+    (Error::InvalidCursor, "error_path_invalid_cursor"),
 ];
 
 fn oversized_bytes(env: &Env, len: u32) -> Bytes {
@@ -87,7 +88,7 @@ fn settle_happy_path(f: &Fixture, t_reveal: u64, commit_deadline: u64, reveal_de
 fn error_paths_registry_covers_every_variant() {
     assert_eq!(
         ERROR_PATH_REGISTRY.len(),
-        27,
+        28,
         "update ERROR_PATH_REGISTRY when adding/removing Error variants"
     );
     for (variant, name) in ERROR_PATH_REGISTRY {
@@ -536,6 +537,13 @@ fn error_path_invalid_limit() {
     let f = setup();
     let operator = Address::generate(&f.env);
     let id = open_round(&f, &operator);
-    assert_try_contract_err(f.client.try_get_bidders_page(&id, &0, &0), Error::InvalidLimit);
-    assert_try_contract_err(f.client.try_get_bidders_page(&id, &0, &101), Error::InvalidLimit);
+    assert_try_contract_err(f.client.try_get_bidders_page(&id, &None, &0), Error::InvalidLimit);
+    assert_try_contract_err(f.client.try_get_bidders_page(&id, &None, &101), Error::InvalidLimit);
+}
+
+#[test]
+fn error_path_invalid_cursor() {
+    let f = setup();
+    let id = open_round(&f, &Address::generate(&f.env));
+    assert_try_contract_err(f.client.try_get_bidders_page(&id, &Some(Bytes::new(&f.env)), &10), Error::InvalidCursor);
 }

@@ -1,4 +1,4 @@
-use soroban_sdk::{contracterror, contracttype, Address, Bytes, BytesN, Vec};
+use soroban_sdk::{contracterror, contracttype, String, Address, Bytes, BytesN, Vec};
 
 /// Contract error codes. Every failure state from the PRD has a defined code —
 /// there is no undefined behavior and no silent fallback.
@@ -35,6 +35,7 @@ pub enum Error {
     NoValidBids = 37,
     RoundFull = 38,
     InvalidLimit = 39,
+    InvalidCursor = 40,
 }
 
 /// Round lifecycle. Mirrors the state machine in PRD §6.
@@ -152,9 +153,10 @@ pub struct Seal {
 pub struct BiddersPage {
     /// Page of bidder addresses.
     pub data: Vec<Address>,
-    /// Cursor for the next page (0 if no more pages).
-    pub next_cursor: u32,
-    /// Total number of bidders in the round.
+    /// Opaque continuation token; None at exhaustion.
+    pub next_cursor: Option<Bytes>,
+    pub has_more: bool,
+    /// Number of bidders in the enumeration snapshot.
     pub total: u32,
 }
 

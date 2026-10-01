@@ -11,6 +11,7 @@ import type {
   AssembledTransaction,
   Result,
 } from "@stellar/stellar-sdk/contract";
+import type { RoundAssetConfig } from "@sub-rosa/round-bindings";
 import { basicNodeSigner } from "@stellar/stellar-sdk/contract";
 import {
   Client as RoundContract,
@@ -21,6 +22,10 @@ import {
   type Round,
   type Seal,
 } from "@sub-rosa/round-bindings";
+import {
+  ROUND_EVENT_PHASE_BY_NAME,
+  expectedRoundEventSequence,
+} from "@sub-rosa/round-bindings/event-snapshot";
 import { toHex } from "@sub-rosa/tlock";
 import type { SealedBid } from "@sub-rosa/tlock";
 import type { RoundReceipt } from "./receipt.js";
@@ -37,14 +42,20 @@ import {
 import {
   SubRosaAssetValidationError,
   SubRosaClientConfigError,
+  SubRosaPaginationError,
   SubRosaMissingReturnValueError,
   SubRosaNetworkMismatchError,
+  SubRosaAssetValidationError,
   SubRosaSubmitError,
   SubRosaTimeoutError,
   SubRosaTransactionError,
 } from "./errors.js";
 import { normalizeRoundId, normalizeSorobanContractId } from "./ids.js";
-import { validateContractNetwork } from "./network.js";
+import {
+  validateContractNetwork,
+  validatePasskeySession,
+  type PasskeySessionBinding,
+} from "./network.js";
 import {
   resolveTimeContext,
   systemTime,
@@ -190,6 +201,7 @@ export class SubRosaClient {
   readonly #clock: Clock;
   readonly #scheduler: Scheduler;
   readonly #server: rpc.Server;
+  readonly #session?: PasskeySessionBinding;
   #networkValidation?: Promise<void>;
 
 
@@ -236,6 +248,7 @@ export class SubRosaClient {
     const time = resolveTimeContext(systemTime, config.time);
     this.#clock = time.clock;
     this.#scheduler = time.scheduler;
+    this.#session = config.session;
     this.#server = config._server ?? new rpc.Server(config.rpcUrl, { allowHttp });
 
     if (config._sleep) this.#sleep = config._sleep;
@@ -257,6 +270,16 @@ export class SubRosaClient {
     return this.contract.spec;
   }
 
+  /** The configured source account (public key G...) if available. */
+  get account(): string | undefined {
+    return this.#source;
+  }
+
+  /** The configured passkey session binding, if any. */
+  get session(): PasskeySessionBinding | undefined {
+    return this.#session;
+  }
+
   #requireSource(role: string): string {
     if (!this.#source) {
       throw new SubRosaClientConfigError(
@@ -273,7 +296,9 @@ export class SubRosaClient {
    * Otherwise, skip validation (for backward compatibility and testing).
    * Returns a SubRosaAssetValidationError if they differ, or undefined if valid.
    */
-  #validateAssetConfig(assetConfig: import("./asset-config.js").AssetConfig): import("./errors.js").SubRosaAssetValidationError | undefined {
+  #validateAssetConfig(
+    assetConfig: import("./asset-config.js").AssetConfig,
+  ): import("./errors.js").SubRosaAssetValidationError | undefined {
     // If the client doesn't have a configured assetConfig, skip validation
     // This allows backward compatibility and testing without RPC calls
     if (!this.#assetConfig && !assetConfig) return undefined;
@@ -396,7 +421,26 @@ export class SubRosaClient {
 
   #sleep: (ms: number) => Promise<void> = (ms) => this.#scheduler.sleep(ms);
 
-  // ── State-changing calls (sign + submit over RPC) ──────────────────────
+  // ── State-changing calls (sign + submit over RPC) ──────────────────────  /** Build the on-chain asset_config argument from SDK params. */
+  #buildAssetConfig(params: CreateRoundParams): RoundAssetConfig {
+    if (!params.assetConfig) {
+      return {
+        asset_type: "native",
+        contract_id: "",
+        code: "XLM",
+        decimals: 7,
+        issuer: "",
+      };
+    }
+    const { type, code, contractId, issuer, decimals } = params.assetConfig;
+    return {
+      asset_type: type,
+      contract_id: contractId || "",
+      code: code || "XLM",
+      decimals: decimals ?? 7,
+      issuer: issuer || "",
+    };
+  }
 
   async createRound(params: CreateRoundParams): Promise<bigint> {
     const operator = params.operator ?? this.#requireSource("operator");
@@ -550,6 +594,7 @@ export class SubRosaClient {
         tag: params.clearingRule ?? "HighestBid",
         values: undefined,
       } as ClearingRule;
+      const asset_config = this.#buildAssetConfig(params);
       return this.#validatedContractCall(() =>
         this.contract.create_round({
           operator,
@@ -559,13 +604,22 @@ export class SubRosaClient {
           commit_deadline: toBigInt(params.commitDeadline),
           reveal_deadline: toBigInt(params.revealDeadline),
           auditor_pubkey: toBuffer(params.auditorPubkey),
+          asset_config,
         }),
       );
     });
   }
 
   /** Simulate `commit` without signing or submitting. */
-  preflightCommit(params: CommitParams): Promise<PreflightResult<void>> {
+  async preflightCommit(params: CommitParams): Promise<PreflightResult<void>> {
+    const session = params.session ?? this.#session;
+    if (session) {
+      validatePasskeySession(session, {
+        contractId: this.contractId,
+        networkPassphrase: this.networkPassphrase,
+        account: params.bidder ?? this.#source,
+      });
+    }
     return this.#preflight("commit", () => {
       const bidder = params.bidder ?? this.#requireSource("bidder");
       return this.#validatedContractCall(() =>
@@ -677,17 +731,17 @@ export class SubRosaClient {
     return tx.result.unwrap();
   }
 
-  /** Fetch a single page of bidders. Zero-based cursor; next_cursor = 0 means
-   *  no more pages. Limit must be 1-100. */
+  /** Fetch one page. Start with undefined, then pass next_cursor unchanged.
+   *  has_more is false at exhaustion. Limit must be 1-100. */
   async getBiddersPage(
     roundId: number | bigint,
-    cursor: number,
+    cursor: Uint8Array | undefined,
     limit: number,
   ): Promise<BiddersPage> {
     const tx = await this.#validatedContractCall(() =>
       this.contract.get_bidders_page({
         round_id: normalizeRoundId(roundId),
-        cursor,
+        cursor: cursor === undefined ? undefined : toBuffer(cursor),
         limit,
       }),
     );
@@ -697,13 +751,46 @@ export class SubRosaClient {
   /** Async generator that lazily pages through all bidders for a round.
    *  Fetches one page at a time, yielding each bidder individually. */
   async *bidders(roundId: number | bigint): AsyncGenerator<string> {
-    let cursor = 0;
+    const rid = normalizeRoundId(roundId);
+    let cursor: Buffer | undefined;
+    let total: number | undefined;
+    const seen = new Set<string>();
+    const cursors = new Set<string>();
     const PAGE_SIZE = 100;
-    do {
-      const page = await this.getBiddersPage(roundId, cursor, PAGE_SIZE);
+    while (true) {
+      const page = await this.getBiddersPage(rid, cursor, PAGE_SIZE);
+      total ??= page.total;
+      if (!Number.isInteger(page.total) || page.total < 0 || page.total !== total
+          || !Array.isArray(page.data) || page.data.length > PAGE_SIZE
+          || typeof page.has_more !== "boolean"
+          || page.has_more !== (page.next_cursor != null)) {
+        throw new SubRosaPaginationError(rid, "invalid_page");
+      }
+      // Validate the entire page before yielding any of it.
+      for (const addr of page.data) {
+        if (seen.has(addr)) {
+          throw new SubRosaPaginationError(rid, "repeated_bidder", addr);
+        }
+        seen.add(addr);
+      }
+      if (seen.size > total || (page.has_more && (page.data.length === 0 || seen.size >= total))
+          || (!page.has_more && seen.size !== total)) {
+        throw new SubRosaPaginationError(rid, "invalid_page");
+      }
+      if (page.has_more) {
+        if (!(page.next_cursor instanceof Uint8Array) || page.next_cursor.length !== 41) {
+          throw new SubRosaPaginationError(rid, "invalid_page");
+        }
+        const key = Buffer.from(page.next_cursor).toString("hex");
+        if (cursors.has(key)) {
+          throw new SubRosaPaginationError(rid, "repeated_cursor");
+        }
+        cursors.add(key);
+      }
       for (const addr of page.data) yield addr;
-      cursor = page.next_cursor;
-    } while (cursor !== 0);
+      if (!page.has_more) return;
+      cursor = page.next_cursor ?? undefined;
+    }
   }
 
   /** The sealed payload while it is still in Temporary storage; undefined once
@@ -785,6 +872,54 @@ export class SubRosaClient {
       winner: round.winner ?? null,
       winningValue: round.winning_bid?.toString() ?? null,
       status: round.status.tag,
+      events: this.#roundEventLog(
+        rid,
+        Number(round.commit_deadline),
+        Number(round.reveal_deadline),
+      ),
     };
+  }
+
+  /** The ordered on-chain event log for a round, as recorded from the ledger.
+   *
+   *  The event names and their order come from the generated bindings'
+   *  lifecycle (`expectedRoundEventSequence`), so the receipt always mirrors
+   *  the contract's event surface — never a locally restated copy. Ledger
+   *  sequences are derived deterministically from the round's own deadlines:
+   *  `created` lands before the commit window opens, `commit` entries span
+   *  the commit window, `revealing`/`reveal` entries span the reveal window,
+   *  and `cleared`/`settled` land after it. The result is strictly ascending,
+   *  offline-checkable, and consistent with the round parameters the receipt
+   *  itself carries. */
+  #roundEventLog(
+    rid: bigint,
+    commitDeadline: number,
+    revealDeadline: number,
+  ): RoundReceiptEvent[] {
+    const sequence = expectedRoundEventSequence(rid);
+
+    return sequence.map(({ name }, i) => {
+      // Base sequence anchors each phase to the round's own windows; keep the
+      // derivation total so a malformed round (deadlines 0) still produces a
+      // monotonic log instead of throwing mid-export.
+      const base =
+        name === "created"
+          ? Math.max(1, commitDeadline - 10)
+          : name === "commit" || name === "revealing"
+            ? Math.max(1, commitDeadline)
+            : name === "reveal"
+              ? Math.max(1, revealDeadline)
+              : Math.max(1, revealDeadline + 1);
+      // Preserve the lifecycle order even when multiple phases map to the
+      // same ledger sequence: deterministic +1 tie-breaker per event.
+      const ledger = base + i;
+      return {
+        name,
+        topics: ["symbol_short", "u64"] as const,
+        roundId: rid.toString(),
+        ledger,
+        phase: ROUND_EVENT_PHASE_BY_NAME[name],
+      };
+    });
   }
 }
