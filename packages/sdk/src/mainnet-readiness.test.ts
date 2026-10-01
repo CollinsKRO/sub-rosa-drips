@@ -10,9 +10,12 @@ import {
   assertReadinessForExecute,
   defaultMainnetReadinessInput,
   hasBlockingFailures,
+  parseMicroStroops,
   runMainnetReadiness,
+  runMicroRunnerGate,
   verifySettledRoundProof,
   type MainnetReadinessDeps,
+  type ReadinessCheck,
 } from "./mainnet-readiness.js";
 import {
   MAINNET_ARTIFACTS,
@@ -203,5 +206,182 @@ describe("runMainnetReadiness", () => {
 
     const balanceCheck = report.checks.find((c) => c.id === "contract-balance");
     assert.equal(balanceCheck?.status, "block");
+  });
+});
+
+describe("parseMicroStroops", () => {
+  it("returns the fallback when unset or blank", () => {
+    assert.equal(
+      parseMicroStroops("MICRO_BID_STROOPS", undefined, 500_000n),
+      500_000n,
+    );
+    assert.equal(
+      parseMicroStroops("MICRO_BID_STROOPS", "   ", 500_000n),
+      500_000n,
+    );
+  });
+
+  it("accepts plain positive integer stroops within the cap", () => {
+    assert.equal(parseMicroStroops("X", "1000000", 1n), 1_000_000n);
+  });
+
+  it("refuses non-integer, zero, negative and over-cap values", () => {
+    assert.throws(() => parseMicroStroops("X", "1.5", 1n), /integer stroop/);
+    assert.throws(() => parseMicroStroops("X", "1e3", 1n), /integer stroop/);
+    assert.throws(() => parseMicroStroops("X", "0x10", 1n), /integer stroop/);
+    assert.throws(() => parseMicroStroops("X", "-5", 1n), /integer stroop/);
+    assert.throws(() => parseMicroStroops("X", "0", 1n), /positive/);
+    assert.throws(
+      () =>
+        parseMicroStroops(
+          "X",
+          (MAINNET_MICRO_MAX_ESCROW + 1n).toString(),
+          1n,
+        ),
+      /MAINNET_MICRO_MAX_ESCROW/,
+    );
+  });
+});
+
+const PASS_CHECK: ReadinessCheck = {
+  id: "wasm-hash",
+  label: "Artifact wasm hash",
+  status: "pass",
+  message: "on-chain hash matches frozen artifact",
+};
+
+const BLOCK_CHECK: ReadinessCheck = {
+  id: "wasm-hash",
+  label: "Artifact wasm hash",
+  status: "block",
+  message: "on-chain hash mismatch",
+};
+
+describe("runMicroRunnerGate", () => {
+  it("dry-run with a matching fixture exits without readiness or submit", async () => {
+    let readinessCalls = 0;
+    let submits = 0;
+
+    const decision = await runMicroRunnerGate({
+      execute: false,
+      bidStroops: 500_000n,
+      escrowStroops: 1_000_000n,
+      env: {},
+      runReadiness: async () => {
+        readinessCalls++;
+        return [PASS_CHECK];
+      },
+      submit: async () => {
+        submits++;
+      },
+    });
+
+    assert.deepEqual(decision, {
+      action: "dry-run",
+      bidStroops: 500_000n,
+      escrowStroops: 1_000_000n,
+    });
+    assert.equal(readinessCalls, 0);
+    assert.equal(submits, 0);
+  });
+
+  it("refuses over-cap and zero amounts without building", async () => {
+    let submits = 0;
+    const base = {
+      execute: true,
+      env: { MAINNET_CONFIRM: MAINNET_CONFIRM_PHRASE },
+      runReadiness: async () => [PASS_CHECK],
+      submit: async () => {
+        submits++;
+      },
+    };
+
+    await assert.rejects(
+      () =>
+        runMicroRunnerGate({
+          ...base,
+          bidStroops: 1n,
+          escrowStroops: MAINNET_MICRO_MAX_ESCROW + 1n,
+        }),
+      /MAINNET_MICRO_MAX_ESCROW/,
+    );
+    await assert.rejects(
+      () =>
+        runMicroRunnerGate({
+          ...base,
+          bidStroops: 0n,
+          escrowStroops: 1_000_000n,
+        }),
+      /positive/,
+    );
+    assert.equal(submits, 0);
+  });
+
+  it("does not run readiness or build when the confirm phrase is missing", async () => {
+    let readinessCalls = 0;
+    let submits = 0;
+
+    await assert.rejects(
+      () =>
+        runMicroRunnerGate({
+          execute: true,
+          bidStroops: 500_000n,
+          escrowStroops: 1_000_000n,
+          env: {},
+          runReadiness: async () => {
+            readinessCalls++;
+            return [PASS_CHECK];
+          },
+          submit: async () => {
+            submits++;
+          },
+        }),
+      /MAINNET_CONFIRM/,
+    );
+
+    assert.equal(readinessCalls, 0);
+    assert.equal(submits, 0);
+  });
+
+  it("does not build a transaction when readiness is blocked", async () => {
+    let submits = 0;
+
+    await assert.rejects(
+      () =>
+        runMicroRunnerGate({
+          execute: true,
+          bidStroops: 500_000n,
+          escrowStroops: 1_000_000n,
+          env: { MAINNET_CONFIRM: MAINNET_CONFIRM_PHRASE },
+          runReadiness: async () => [BLOCK_CHECK],
+          submit: async () => {
+            submits++;
+          },
+        }),
+      /wasm-hash/,
+    );
+
+    assert.equal(submits, 0);
+  });
+
+  it("submits only after strict readiness passes", async () => {
+    const order: string[] = [];
+
+    const decision = await runMicroRunnerGate({
+      execute: true,
+      bidStroops: 500_000n,
+      escrowStroops: 1_000_000n,
+      env: { MAINNET_CONFIRM: MAINNET_CONFIRM_PHRASE },
+      runReadiness: async () => {
+        order.push("readiness");
+        return [PASS_CHECK];
+      },
+      submit: async () => {
+        order.push("submit");
+      },
+    });
+
+    assert.deepEqual(order, ["readiness", "submit"]);
+    assert.equal(decision.action, "send");
   });
 });

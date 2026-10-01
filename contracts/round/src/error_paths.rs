@@ -10,8 +10,8 @@ use crate::types::{ClearingRule, DataKey, Error, Status};
 
 use super::{
     assert_try_create_round_err, assert_try_contract_err, b32, commit_bid, commitment,
-    drand_round, funded_bidder, open_round, real_sig, setup, setup_drand, Fixture, GENESIS,
-    PERIOD, VEC_ROUND,
+    drand_round, funded_bidder, open_round, real_sig, sac_asset_config, setup, setup_drand,
+    Fixture, GENESIS, PERIOD, VEC_ROUND,
 };
 
 const MAX_BIDDERS: u32 = 500;
@@ -45,6 +45,7 @@ const ERROR_PATH_REGISTRY: &[(Error, &'static str)] = &[
     (Error::NoValidBids, "error_path_no_valid_bids"),
     (Error::RoundFull, "error_path_round_full"),
     (Error::InvalidLimit, "error_path_invalid_limit"),
+    (Error::InvalidCursor, "error_path_invalid_cursor"),
 ];
 
 fn oversized_bytes(env: &Env, len: u32) -> Bytes {
@@ -87,7 +88,7 @@ fn settle_happy_path(f: &Fixture, t_reveal: u64, commit_deadline: u64, reveal_de
 fn error_paths_registry_covers_every_variant() {
     assert_eq!(
         ERROR_PATH_REGISTRY.len(),
-        27,
+        28,
         "update ERROR_PATH_REGISTRY when adding/removing Error variants"
     );
     for (variant, name) in ERROR_PATH_REGISTRY {
@@ -217,6 +218,7 @@ fn error_path_commit_deadline_after_reveal() {
             &2_000,
             &2_500,
             &Bytes::from_array(&f.env, b"a"),
+            &sac_asset_config(&f.env),
         ),
         Error::CommitDeadlineAfterReveal,
     );
@@ -372,6 +374,7 @@ fn error_path_invalid_drand_signature() {
         &commit_deadline,
         &reveal_deadline,
         &Bytes::from_array(&f.env, b"auditor"),
+        &sac_asset_config(&f.env),
     );
     let bidder = funded_bidder(&f, 1_000);
     commit_bid(&f, id, &bidder, 100, 100, 0x01);
@@ -426,6 +429,7 @@ fn error_path_payload_too_large() {
             &1_500,
             &2_500,
             &oversized_bytes(&f.env, 1025),
+            &sac_asset_config(&f.env),
         ),
         Error::PayloadTooLarge,
     );
@@ -488,6 +492,7 @@ fn error_path_deadline_in_past() {
             &500,
             &2_500,
             &Bytes::from_array(&f.env, b"a"),
+            &sac_asset_config(&f.env),
         ),
         Error::DeadlineInPast,
     );
@@ -532,6 +537,13 @@ fn error_path_invalid_limit() {
     let f = setup();
     let operator = Address::generate(&f.env);
     let id = open_round(&f, &operator);
-    assert_try_contract_err(f.client.try_get_bidders_page(&id, &0, &0), Error::InvalidLimit);
-    assert_try_contract_err(f.client.try_get_bidders_page(&id, &0, &101), Error::InvalidLimit);
+    assert_try_contract_err(f.client.try_get_bidders_page(&id, &None, &0), Error::InvalidLimit);
+    assert_try_contract_err(f.client.try_get_bidders_page(&id, &None, &101), Error::InvalidLimit);
+}
+
+#[test]
+fn error_path_invalid_cursor() {
+    let f = setup();
+    let id = open_round(&f, &Address::generate(&f.env));
+    assert_try_contract_err(f.client.try_get_bidders_page(&id, &Some(Bytes::new(&f.env)), &10), Error::InvalidCursor);
 }

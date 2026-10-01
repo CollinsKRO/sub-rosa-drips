@@ -26,6 +26,7 @@ import {
 import { formatCountdown, useDrandCountdown } from "../hooks/useDrandCountdown";
 import { useRoundSession, type ActionStatus } from "../hooks/useRoundSession";
 import { getRoundStatusInfo } from "../lib/round-status";
+import { useRevealPhase } from "../lib/use-reveal-phase";
 import { shortAddr } from "../lib/format";
 import { RoundStatusBadge } from "../components/RoundStatusBadge";
 import { LOGO_SRC } from "../lib/chain";
@@ -776,7 +777,7 @@ function ComparisonMini({ useCase, committed }: { useCase: UseCase; committed: b
   );
 }
 
-function EvidencePanel() {
+function EvidencePanel({ phase }: { phase: "Open" | "Reveal" | "Settled" }) {
   return (
     <div className="evidence-stack">
       <p className="evidence-intro">
@@ -785,7 +786,7 @@ function EvidencePanel() {
       </p>
       <MainnetProofCard />
       <LifecycleView trace={DEMO_TRACE} />
-      <AttackDemo />
+      <AttackDemo phase={phase} />
       <SettlementRail trace={DEMO_TRACE} />
       <AgentActivity trace={DEMO_TRACE} />
       <X402Logs trace={DEMO_TRACE} />
@@ -809,6 +810,9 @@ export function DemoPage({
   const [mode, setMode] = useState<DemoMode>("live");
   const [confettiTick, setConfettiTick] = useState(0);
   const session = useRoundSession(active);
+  // One shared phase decision for every view in the evidence stack — the
+  // attack demo must agree with the observer on when values become public.
+  const { phase } = useRevealPhase({ trace: DEMO_TRACE, live: null });
   const sidebarDrand =
     mode === "evidence"
       ? { mode: "proof" as const, targetRound: DEMO_TRACE.meta.revealRound }
@@ -887,7 +891,7 @@ export function DemoPage({
                 onCelebrate={() => setConfettiTick((t) => t + 1)}
               />
             ) : (
-              <EvidencePanel />
+              <EvidencePanel phase={phase} />
             )}
           </motion.section>
         </AnimatePresence>

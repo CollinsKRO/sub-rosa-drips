@@ -1,7 +1,8 @@
 import { publicErrorMessage } from "@sub-rosa/logging/errors";
 // Copyright (c) 2026 Sub Rosa contributors
 import { Buffer } from "buffer";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { gateDemoActions } from "../lib/config";
 import {
   getNetworkDetails,
   isConnected,
@@ -121,7 +122,11 @@ export function useRoundSession(active: UseCase) {
   const session = sessions[active.id];
   const { auditorPublicKey, commitValue, sealedCiphertext, live, log, roundId, roundCreatedAt } =
     session;
-  const canUseContract = Boolean(CONTRACT_ID && contract);
+  const actionGate = useMemo(
+    () => gateDemoActions(contract ? contract.options : null, PUBLIC_ENV),
+    [contract],
+  );
+  const canUseContract = Boolean(CONTRACT_ID && contract && actionGate.enabled);
   const targetRound = live ? Number(live.round.reveal_round) : DEMO_TRACE.meta.revealRound;
   const drandGate = useDrandCountdown(targetRound);
   const commitSecondsRemaining = live
@@ -351,6 +356,10 @@ export function useRoundSession(active: UseCase) {
 
   async function commitEntry() {
     if (!contract || !address || roundId == null) return;
+    if (!actionGate.enabled) {
+      toast.push("error", "Commit disabled", actionGate.issues[0]?.message ?? "Config mismatch");
+      return;
+    }
     const id = active.id;
     const displayed = active.formatValue(entryValue);
     const workingId = toast.push("working", "Sealing your entry…", `${active.inputLabel}: ${displayed}`);
@@ -404,6 +413,10 @@ export function useRoundSession(active: UseCase) {
 
   async function openAndReveal() {
     if (!contract || roundId == null) return;
+    if (!actionGate.enabled) {
+      toast.push("error", "Reveal disabled", actionGate.issues[0]?.message ?? "Config mismatch");
+      return;
+    }
     const id = active.id;
     if (live && !drandGate.published) {
       toast.push(
@@ -526,6 +539,7 @@ export function useRoundSession(active: UseCase) {
     session,
     status,
     canUseContract,
+    actionGate,
     targetRound,
     drandGate,
     commitSecondsRemaining,
