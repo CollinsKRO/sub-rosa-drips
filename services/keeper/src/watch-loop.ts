@@ -24,7 +24,10 @@ import {
 import type { SettlementGuard } from "./settlement-guard.js";
 import type { KeeperLogger } from "./keeper.js";
 import { KeeperStore } from "./store.js";
-import { KeeperQueue } from "./queue.js";
+import type {
+  ResumableCheckpoint,
+  TransactionHashVerifier,
+} from "./checkpoint.js";
 
 export interface RunWatchLoopParams {
   sdk: SubRosaClient;
@@ -36,6 +39,10 @@ export interface RunWatchLoopParams {
   store: KeeperStore;
   settlementGuard: SettlementGuard;
   isStopping: () => boolean;
+  /** Durable watch cursor. When omitted the loop still runs, just without a cursor. */
+  checkpoint?: ResumableCheckpoint;
+  /** Optional transaction-hash lookup used to confirm recorded cursor steps. */
+  verifyTransaction?: TransactionHashVerifier;
   /** Injectable wall clock and scheduler. Default: systemTime. */
   time?: PartialTimeContext;
   queue?: KeeperQueue;
@@ -66,56 +73,55 @@ async function resolveRoundIds(reader: SubRosaClient): Promise<bigint[]> {
   });
 }
 
+export interface ResumeCheckpointParams {
+  checkpoint?: ResumableCheckpoint;
+  sdk: Pick<SubRosaClient, "getRound">;
+  log: KeeperLogger;
+  verifyTransaction?: TransactionHashVerifier;
+}
+
 /**
- * Bounds in-flight round execution during shutdown by the given scheduler and timeout.
+ * Startup resume gate for the watch cursor.
+ *
+ * 1. Re-check every recorded transaction hash. A hash that is not `confirmed`
+ *    is rolled back so the step is retried.
+ * 2. Reconcile the remaining (hashless) cursor entries against the on-chain
+ *    status. If the chain cannot prove a step happened, drop it rather than
+ *    stranding the round.
  */
-async function waitForInFlight<T>(
-  promise: Promise<T>,
-  opts: {
-    isStopping: () => boolean;
-    scheduler: Scheduler;
-    timeoutMs: number;
-    roundId: bigint;
-  },
-): Promise<T> {
-  const { isStopping, scheduler, timeoutMs, roundId } = opts;
-  let done = false;
+export async function resumeCheckpoint(
+  params: ResumeCheckpointParams,
+): Promise<void> {
+  const { checkpoint, sdk, log, verifyTransaction } = params;
+  if (!checkpoint) return;
 
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    const triggerTimeout = () => {
-      scheduler.setTimeout(() => {
-        if (!done) {
-          reject(new Error(`Shutdown timeout (${timeoutMs}ms) waiting for round ${roundId}`));
-        }
-      }, timeoutMs);
-    };
+  for (const verification of await checkpoint.verifyHashes(verifyTransaction)) {
+    log(
+      `checkpoint ${verification.retained ? "confirmed" : "rolled back"} ` +
+        `${verification.step} for round ${verification.roundId} ` +
+        `(tx ${verification.transactionHash}: ${verification.status})`,
+    );
+  }
 
-    if (isStopping()) {
-      triggerTimeout();
-      return;
+  for (const roundId of checkpoint.listRoundIds()) {
+    let status: string;
+    try {
+      status = (await sdk.getRound(roundId)).status.tag;
+    } catch (e) {
+      // An unreadable round is not proof of anything — keep the cursor and retry
+      // reconciliation on the next tick.
+      log(
+        `checkpoint: could not read round ${roundId} to reconcile: ${normalizeError(e).message}`,
+      );
+      continue;
     }
-
-    const checkInterval = 25;
-    let pollHandle: ReturnType<typeof scheduler.setTimeout> | undefined;
-
-    const check = () => {
-      if (done) return;
-      if (isStopping()) {
-        triggerTimeout();
-        return;
-      }
-      pollHandle = scheduler.setTimeout(check, checkInterval);
-    };
-
-    pollHandle = scheduler.setTimeout(check, checkInterval);
-  });
-
-  return Promise.race([
-    promise.finally(() => {
-      done = true;
-    }),
-    timeoutPromise,
-  ]);
+    const dropped = checkpoint.reconcile(roundId, status);
+    if (dropped.length > 0) {
+      log(
+        `checkpoint: round ${roundId} is ${status}; retrying ${dropped.join(", ")}`,
+      );
+    }
+  }
 }
 
 export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
@@ -129,6 +135,8 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
     store,
     settlementGuard,
     isStopping,
+    checkpoint,
+    verifyTransaction,
     time,
     owner: explicitOwner,
     leaseMs,
@@ -140,11 +148,9 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
 
   const resolvedTime = resolveTimeContext(systemTime, time);
   const { clock, scheduler } = resolvedTime;
-  const deps: KeeperDeps = { sdk, drand, log, time: resolvedTime, settlementGuard };
-  const queue = params.queue ?? new KeeperQueue(store, { contractId, network });
-  const shutdownTimeoutMs = params.shutdownTimeoutMs ?? 30000;
+  const deps: KeeperDeps = { sdk, drand, log, time: resolvedTime, checkpoint };
 
-  const shouldStop = () => isStopping() || queue.isStopping();
+  await resumeCheckpoint({ checkpoint, sdk, log, verifyTransaction });
 
   while (!shouldStop()) {
     const started = clock.nowMs();
