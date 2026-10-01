@@ -26,6 +26,7 @@ import {
 } from "../lib/chain";
 import { formatCountdown, useDrandCountdown } from "../hooks/useDrandCountdown";
 import { useRoundSession, type ActionStatus } from "../hooks/useRoundSession";
+import { useTraceHealth } from "../hooks/useTraceHealth";
 import { getRoundStatusInfo } from "../lib/round-status";
 import { useRevealPhase } from "../lib/use-reveal-phase";
 import { shortAddr } from "../lib/format";
@@ -100,6 +101,7 @@ function PhaseGuide(props: {
   commitEntry: () => void;
   openAndReveal: () => void;
   suggestedRoundId: bigint | null;
+  traceHealthy?: boolean;
 }) {
   const {
     useCase,
@@ -121,6 +123,7 @@ function PhaseGuide(props: {
     commitEntry,
     openAndReveal,
     suggestedRoundId,
+    traceHealthy = true,
   } = props;
   const [joinId, setJoinId] = useState("");
   const [duration, setDuration] = useState<number>(DEFAULT_COMMIT_DURATION_SECONDS);
@@ -243,6 +246,18 @@ function PhaseGuide(props: {
   if (working) {
     ctaDisabled = true;
     ctaLabel = "Signing…";
+  }
+
+  // Trace checksum hard-stop: disable commit, open+reveal, and settle.
+  // Connect and create-round do not depend on the canonical trace so they
+  // are left enabled to allow recovery and inspection.
+  if (!traceHealthy) {
+    const isCommitPhase = roundId != null && !committed && !commitClosed;
+    const isRevealPhase = committed && drandGate.published;
+    if (isCommitPhase || isRevealPhase) {
+      ctaDisabled = true;
+      ctaLabel = "Trace invalid";
+    }
   }
 
   return (
@@ -496,10 +511,12 @@ function LivePanel({
   active,
   session,
   onCelebrate,
+  traceHealthy,
 }: {
   active: UseCase;
   session: ReturnType<typeof useRoundSession>;
   onCelebrate: () => void;
+  traceHealthy: boolean;
 }) {
   const {
     address,
@@ -613,8 +630,9 @@ function LivePanel({
         createRound={(duration) => void createRound(duration)}
         joinRound={(id) => void joinRound(id)}
         suggestedRoundId={DEFAULT_ROUND_ID}
-        commitEntry={() => void commitEntry()}
-        openAndReveal={() => void openAndReveal()}
+        commitEntry={traceHealthy ? () => void commitEntry() : () => {}}
+        openAndReveal={traceHealthy ? () => void openAndReveal() : () => {}}
+        traceHealthy={traceHealthy}
       />
 
       {revealProgress ? (
@@ -778,7 +796,20 @@ function ComparisonMini({ useCase, committed }: { useCase: UseCase; committed: b
   );
 }
 
-function EvidencePanel({ phase }: { phase: "Open" | "Reveal" | "Settled" }) {
+function EvidencePanel({ errorCode }: { errorCode?: string }) {
+  if (errorCode) {
+    return (
+      <div className="evidence-stack">
+        <p className="evidence-intro evidence-intro--error" role="alert">
+          Trace checksum failed — evidence is unavailable.
+        </p>
+        <pre className="trace-error-code" data-testid="trace-error-code">
+          {errorCode}
+        </pre>
+      </div>
+    );
+  }
+
   return (
     <div className="evidence-stack">
       <p className="evidence-intro">
@@ -811,9 +842,7 @@ export function DemoPage({
   const [mode, setMode] = useState<DemoMode>("live");
   const [confettiTick, setConfettiTick] = useState(0);
   const session = useRoundSession(active);
-  // One shared phase decision for every view in the evidence stack — the
-  // attack demo must agree with the observer on when values become public.
-  const { phase } = useRevealPhase({ trace: DEMO_TRACE, live: null });
+  const traceHealth = useTraceHealth();
   const sidebarDrand =
     mode === "evidence"
       ? { mode: "proof" as const, targetRound: DEMO_TRACE.meta.revealRound }
@@ -890,9 +919,10 @@ export function DemoPage({
                 active={active}
                 session={session}
                 onCelebrate={() => setConfettiTick((t) => t + 1)}
+                traceHealthy={traceHealth.ok}
               />
             ) : (
-              <EvidencePanel phase={phase} />
+              <EvidencePanel errorCode={traceHealth.ok ? undefined : traceHealth.errorCode} />
             )}
           </motion.section>
         </AnimatePresence>
