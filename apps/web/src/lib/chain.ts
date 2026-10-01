@@ -16,6 +16,10 @@ export const RPC_URL = import.meta.env.VITE_RPC_URL ?? "https://soroban-testnet.
 export const NETWORK =
   import.meta.env.VITE_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
 export const CONTRACT_ID = import.meta.env.VITE_CONTRACT_ID;
+/** Public (VITE_*) config the demo action gate compares against the SDK client. */
+export const PUBLIC_ENV: Record<string, string | undefined> = import.meta.env ?? {};
+/** Identity the wallet SDK client is built with; compared against the public config before demo actions. */
+export const SDK_CLIENT_IDENTITY = CONTRACT_ID ? { contractId: CONTRACT_ID, networkPassphrase: NETWORK } : null;
 export const ESCROW_TOKEN_LABEL = import.meta.env.VITE_ESCROW_TOKEN_LABEL ?? "token";
 export const DEFAULT_ROUND_ID = import.meta.env.VITE_ROUND_ID
   ? BigInt(import.meta.env.VITE_ROUND_ID)

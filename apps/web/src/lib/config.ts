@@ -86,3 +86,54 @@ export function hasConfigIssues(
 ): boolean {
   return validatePublicConfig(env).length > 0;
 }
+
+// ── Demo action gate ──────────────────────────────────────────────────────
+// The banner and the demo actions must agree: when the public config and the
+// SDK client disagree on contract id or network passphrase, commit, reveal and
+// settle are disabled. Messages name keys only, never env values.
+
+export type DemoAction = "commit" | "reveal" | "settle";
+export const DEMO_ACTIONS: readonly DemoAction[] = ["commit", "reveal", "settle"];
+
+/** The identity the SDK client was constructed with (e.g. `RoundContract.options`). */
+export interface SdkClientIdentity {
+  contractId?: string | null;
+  networkPassphrase?: string | null;
+}
+
+export interface DemoActionGate {
+  enabled: boolean;
+  issues: ConfigIssue[];
+}
+
+function present(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+export function gateDemoActions(
+  client: SdkClientIdentity | null,
+  env: Record<string, string | undefined> = import.meta.env ?? {},
+): DemoActionGate {
+  const issues: ConfigIssue[] = [];
+  const publicContract = present(env.VITE_CONTRACT_ID);
+  const publicNetwork = present(env.VITE_NETWORK_PASSPHRASE);
+
+  if (!publicContract) {
+    issues.push({ key: "VITE_CONTRACT_ID", message: "VITE_CONTRACT_ID is missing — demo commit, reveal and settle are disabled." });
+  }
+  if (!publicNetwork) {
+    issues.push({ key: "VITE_NETWORK_PASSPHRASE", message: "VITE_NETWORK_PASSPHRASE is missing — demo commit, reveal and settle are disabled." });
+  }
+  if (!client) {
+    issues.push({ key: "sdk-client", message: "The SDK client is not configured — demo commit, reveal and settle are disabled." });
+  } else {
+    if (publicContract && present(client.contractId) !== publicContract) {
+      issues.push({ key: "VITE_CONTRACT_ID", message: "VITE_CONTRACT_ID does not match the SDK client contract id — demo commit, reveal and settle are disabled." });
+    }
+    if (publicNetwork && present(client.networkPassphrase) !== publicNetwork) {
+      issues.push({ key: "VITE_NETWORK_PASSPHRASE", message: "VITE_NETWORK_PASSPHRASE does not match the SDK client network — demo commit, reveal and settle are disabled." });
+    }
+  }
+  return { enabled: issues.length === 0, issues };
+}

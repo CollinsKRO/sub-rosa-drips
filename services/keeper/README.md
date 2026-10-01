@@ -20,6 +20,8 @@ pnpm --filter @sub-rosa/keeper run watch
 | `npm run queue add N` | Add a round to the persisted watch queue |
 | `npm run queue list` | List tracked rounds and their latest status |
 | `npm run queue remove N` | Remove a round from the queue |
+| `npm run queue claim N` | Take the exclusive lease on a round |
+| `npm run queue release N` | Give back a lease this owner holds |
 
 ## Status HTTP API
 
@@ -154,7 +156,7 @@ import { KeeperStatusClient } from "@sub-rosa/sdk";
 const client = new KeeperStatusClient({ baseURL: "http://127.0.0.1:8090" });
 const status = await client.getStatus();
 for (const round of status.rounds) {
-  console.log(round.roundId, round.status, round.phase);
+  logger.info("round-status", "round status", { roundId: round.roundId.toString(), status: round.status, phase: round.phase });
 }
 ```
 
@@ -171,9 +173,49 @@ You can manage the queue explicitly via the included CLI:
 # Add a round to watch (inherits contract and network from ENV)
 npm run queue add 42
 
-# List all watched rounds, their statuses, and retry metrics
+# List all watched rounds, their statuses, retry metrics, and any lease
 npm run queue list
 
 # Stop watching a round and delete it from the store
 npm run queue remove 42
+
+# Take the round's lease (owner comes from KEEPER_OWNER, default queue-cli-<pid>)
+npm run queue claim 42
+
+# Give the round back (only the owning KEEPER_OWNER may release it)
+npm run queue release 42
 ```
+
+## Exclusive round leases
+
+Two keeper processes pointed at the same `KEEPER_STORE_PATH` must never reveal
+or settle the same round at the same time. Before it ticks a round, the watch
+loop claims an exclusive lease that is persisted in the store next to the
+queue:
+
+```json
+{
+  "owner": "keeper-4242-1f0d…",
+  "roundId": "42",
+  "network": "Test SDF Network ; September 2015",
+  "contractId": "C…",
+  "expiresAtMs": 1788060000000
+}
+```
+
+- A claim is refused while a **live** lease for the same round, contract, and
+  network is held by a different owner; the losing watcher skips the tick
+  instead of submitting alongside the winner. A lease recorded for one contract
+  id never blocks another contract's round.
+- The lease is released only when the step reaches a terminal success
+  (`Settled` / `Voided`) or a definitive contract failure. A transient failure
+  — a dropped RPC connection, a timeout — keeps the lease so the same owner
+  retries the round on the next tick.
+- Leases expire on the injected clock, so a crashed owner stops locking the
+  round after `KEEPER_LEASE_MS`. The expired lease can then be claimed again,
+  once, by the next watcher.
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `KEEPER_OWNER` | generated per run | Lease owner id for this process. Set it to a stable value when you run the queue CLI against a live watcher's store. |
+| `KEEPER_LEASE_MS` | `120000` | Round lease duration in milliseconds. |

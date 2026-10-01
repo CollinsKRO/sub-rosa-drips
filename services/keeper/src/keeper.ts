@@ -26,6 +26,8 @@ import {
   type TimeContext,
 } from "@sub-rosa/time";
 
+import type { SettlementGuard } from "./settlement-guard.js";
+
 export type KeeperLogger = (msg: string) => void;
 
 export interface KeeperDeps {
@@ -39,6 +41,7 @@ export interface KeeperDeps {
   pollMs?: number;
   /** Injectable wall clock and scheduler. Default: systemTime. */
   time?: PartialTimeContext;
+  settlementGuard?: SettlementGuard;
 }
 
 export interface SkipRecord {
@@ -284,14 +287,27 @@ export async function closeRound(
 
   // ── Phase D: settle a cleared round (real SAC transfers) ──────────────
   if (round.status.tag === "Cleared") {
+    if (deps.settlementGuard) {
+      const check = deps.settlementGuard.canSettle(rid);
+      if (!check.allowed) {
+        result.skipped.push(`settle skipped: duplicate (${check.event.skippedDuplicateReason})`);
+        round = await sdk.getRound(rid);
+        result.finalStatus = round.status.tag;
+        return result;
+      }
+      deps.settlementGuard.markSubmitted(rid);
+    }
     try {
       await sdk.settle(rid);
       result.settled = true;
+      deps.settlementGuard?.markTerminal(rid, "settled on-chain");
       log(`settled round ${rid}`);
     } catch (e) {
       if (errorMatches(e, ["AlreadySettled", "NotCleared", "WrongStatus"])) {
+        deps.settlementGuard?.markTerminal(rid, `skipped: ${errorName(e)}`);
         result.skipped.push(`settle skipped: ${errorName(e)}`);
       } else {
+        deps.settlementGuard?.markRetryable(rid, errorName(e));
         throw e;
       }
     }
