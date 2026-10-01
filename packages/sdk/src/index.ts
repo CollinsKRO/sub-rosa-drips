@@ -171,6 +171,10 @@ export {
   KeeperStatusClient,
   StatusApiError,
   StatusJsonParseError,
+  KeeperStatusTimeoutError,
+  redactUrlUserinfo,
+  type KeeperReadiness,
+  type KeeperNotReadyReason,
   type StatusClientOptions,
   fetchKeeperStatus,
 } from "./status-client.js";
