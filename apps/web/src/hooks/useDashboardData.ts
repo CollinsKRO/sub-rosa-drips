@@ -1,16 +1,20 @@
 import { publicErrorMessage } from "@sub-rosa/logging/errors";
 // Copyright (c) 2026 Sub Rosa contributors
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DashboardData } from "../dashboard/types";
+import type { DashboardSnapshot } from "@sub-rosa/sdk";
 import { DASHBOARD_FIXTURE } from "../dashboard/fixture";
 import { assertDashboardData } from "../dashboard/fixture-health-check";
+import { buildDashboardSnapshot } from "../dashboard/snapshot";
 import { useTime } from "../lib/time";
+import { useDrandCountdown } from "./useDrandCountdown";
 
 const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 const LIVE_POLL_INTERVAL_MS = 30 * 1000; // 30 seconds
 
 export interface UseDashboardDataResult {
   data: DashboardData | null;
+  snapshot: DashboardSnapshot | null;
   loading: boolean;
   error: string | null;
   stale: boolean;
@@ -46,12 +50,11 @@ export function useDashboardData(): UseDashboardDataResult {
   const endpoint = import.meta.env.VITE_DASHBOARD_ENDPOINT as string | undefined;
   const useFixture = !endpoint?.trim();
 
-  const [state, setState] = useState<UseDashboardDataResult>(() => ({
+  const [state, setState] = useState<Omit<UseDashboardDataResult, "snapshot" | "refetch">>(() => ({
     data: null,
     loading: true,
     error: null,
     stale: false,
-    refetch: () => {},
   }));
 
   const fetchData = useCallback(async () => {
@@ -133,8 +136,25 @@ export function useDashboardData(): UseDashboardDataResult {
     return () => scheduler.clear(handle);
   }, [state.data, clock, scheduler]);
 
+  // Build the shared snapshot from the drand countdown for the current round's
+  // reveal round.  useDrandCountdown returns a stable object that updates when
+  // the drand published state changes, so the snapshot is always coherent.
+  const revealRound = state.data?.round.revealRound ?? 0;
+  const drand = useDrandCountdown(revealRound);
+
+  const snapshot = useMemo<DashboardSnapshot | null>(() => {
+    if (!state.data) return null;
+    return buildDashboardSnapshot(
+      state.data,
+      drand.published,
+      state.stale,
+      drand.error,
+    );
+  }, [state.data, drand.published, drand.error, state.stale]);
+
   return {
     ...state,
+    snapshot,
     refetch: fetchData,
   };
 }

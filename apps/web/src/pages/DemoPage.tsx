@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Sub Rosa contributors
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import type { RoundStatus } from "@sub-rosa/sdk";
 import { AgentActivity, KeeperPanel, X402Logs } from "../components/AgentPanels";
 import { AttackDemo } from "../components/AttackDemo";
 import { AuditorView } from "../components/AuditorView";
@@ -27,6 +28,7 @@ import { formatCountdown, useDrandCountdown } from "../hooks/useDrandCountdown";
 import { useRoundSession, type ActionStatus } from "../hooks/useRoundSession";
 import { useTraceHealth } from "../hooks/useTraceHealth";
 import { getRoundStatusInfo } from "../lib/round-status";
+import { useRevealPhase } from "../lib/use-reveal-phase";
 import { shortAddr } from "../lib/format";
 import { RoundStatusBadge } from "../components/RoundStatusBadge";
 import { LOGO_SRC } from "../lib/chain";
@@ -88,6 +90,7 @@ function PhaseGuide(props: {
   revealedCount: number;
   commitSecondsRemaining: number | null;
   commitClosed: boolean;
+  networkMismatch: { chainNetwork: string; sdkNetwork: string } | null;
   drandGate: ReturnType<typeof useDrandCountdown>;
   status: ActionStatus;
   entryValue: number;
@@ -109,6 +112,7 @@ function PhaseGuide(props: {
     revealedCount,
     commitSecondsRemaining,
     commitClosed,
+    networkMismatch,
     drandGate,
     status,
     entryValue,
@@ -224,6 +228,19 @@ function PhaseGuide(props: {
     timerValue = "live";
     ctaLabel = "Open + reveal";
     cta = openAndReveal;
+  }
+
+  if (networkMismatch) {
+    tone = "danger";
+    eyebrow = "Network mismatch";
+    title = "Wrong wallet network";
+    detail = `Connected wallet is on ${networkMismatch.chainNetwork}, but this demo submits to ${networkMismatch.sdkNetwork}. Switch Freighter to ${networkMismatch.sdkNetwork} and reconnect before committing, revealing, or settling.`;
+    timerLabel = "Wallet";
+    timerValue = networkMismatch.chainNetwork;
+    ctaLabel = "Network mismatch";
+    ctaDisabled = true;
+    showInput = false;
+    showJoin = false;
   }
 
   if (working) {
@@ -512,6 +529,7 @@ function LivePanel({
     drandGate,
     commitSecondsRemaining,
     commitClosed,
+    networkMismatch,
     revealedCount,
     committed,
     commitValue,
@@ -603,6 +621,7 @@ function LivePanel({
         revealedCount={revealedCount}
         commitSecondsRemaining={commitSecondsRemaining}
         commitClosed={commitClosed}
+        networkMismatch={networkMismatch}
         drandGate={drandGate}
         status={status}
         entryValue={entryValue}
@@ -798,7 +817,7 @@ function EvidencePanel({ errorCode }: { errorCode?: string }) {
         demo, agents, and auditor tools.
       </p>
       <MainnetProofCard />
-      <LifecycleView trace={DEMO_TRACE} />
+      <LifecycleView status={DEMO_TRACE.meta.roundStatus as RoundStatus} />
       <AttackDemo />
       <SettlementRail trace={DEMO_TRACE} />
       <AgentActivity trace={DEMO_TRACE} />
