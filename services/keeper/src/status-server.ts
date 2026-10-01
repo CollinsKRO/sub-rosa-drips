@@ -32,7 +32,10 @@ interface Route {
   ) => Promise<{ status: number; body: unknown }>;
 }
 
-const JSON_CONTENT = { "content-type": "application/json" };
+const JSON_CONTENT = {
+  "content-type": "application/json",
+  "cache-control": "no-store",
+};
 
 function send(
   res: http.ServerResponse,
@@ -158,7 +161,7 @@ function healthzHandler(
   };
 }
 
-export function createStatusServer(config: StatusServerConfig): http.Server {
+export function createStatusHandler(config: StatusServerConfig): http.RequestListener {
   const host = config.host ?? process.env.KEEPER_STATUS_HOST ?? "127.0.0.1";
   const port = config.port ?? Number(process.env.KEEPER_STATUS_PORT ?? "8090");
 
@@ -176,7 +179,7 @@ export function createStatusServer(config: StatusServerConfig): http.Server {
   const dynamic = makeRoutes(source);
   const fastHealth = healthzHandler(source);
 
-  const server = http.createServer((req, res) => {
+  return (req, res) => {
     try {
       const baseHost = req.headers.host ?? `${host}:${port}`;
       const url = new URL(req.url ?? "/", `http://${baseHost}`);
@@ -209,7 +212,13 @@ export function createStatusServer(config: StatusServerConfig): http.Server {
       (config.logger ?? diagnostics).error("request-failed", normalizeError(e));
       send(res, 500, { error: publicErrorMessage(e) });
     }
-  });
+  };
+}
+
+export function createStatusServer(config: StatusServerConfig): http.Server {
+  const host = config.host ?? process.env.KEEPER_STATUS_HOST ?? "127.0.0.1";
+  const port = config.port ?? Number(process.env.KEEPER_STATUS_PORT ?? "8090");
+  const server = http.createServer(createStatusHandler(config));
 
   // Stash socket hints so tests / callers can probe the bound address server-side
   server.once("listening", () => {

@@ -2,12 +2,24 @@
 import type { RoundStatus as DashboardRoundStatus } from "../dashboard/types";
 import type { RoundStatus as SdkRoundStatus } from "@sub-rosa/sdk";
 
-export type RoundPhase = "Open" | "Reveal" | "Settled";
+// Re-export the shared phase vocabulary so the UI cannot invent a fourth phase
+// name that drifts from `packages/sdk/src/round-status.ts`.
+export { ROUND_PHASE_LABELS, roundPhaseLabel };
+export type { RoundPhase };
 
 export interface ClassifyRoundPhaseInput {
   status: DashboardRoundStatus;
   drandPublished: boolean;
 }
+
+/** Status tags the shared phase helper accepts; anything else is sealed. */
+const KNOWN_ROUND_STATUSES: readonly RoundStatus[] = [
+  "Open",
+  "Revealing",
+  "Cleared",
+  "Settled",
+  "Voided",
+];
 
 export function classifyRoundPhase({
   status,

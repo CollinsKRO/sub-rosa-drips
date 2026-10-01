@@ -13,6 +13,10 @@ import {
   verifyMilestones,
 } from "./demo-trace.checksum.js";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 test("canonical generated demo trace contains every field required by the UI", () => {
   assert.doesNotThrow(() => assertDemoTrace(DEMO_TRACE));
 });
@@ -90,4 +94,53 @@ test("checksum fails when a required milestone is removed from lifecycle", () =>
   const result = verifyMilestones(phases);
   assert.ok(!result.ok);
   assert.ok(result.ok === false && result.missing.includes("open_reveal"));
+});
+
+test("dropping a bidder fails the checksum", () => {
+  const invalidTrace = structuredClone(DEMO_TRACE) as unknown as {
+    bidders: Array<unknown>;
+    keeper: { reveals: string[] };
+  };
+  const dropped = invalidTrace.bidders[invalidTrace.bidders.length - 1] as { label: string };
+  invalidTrace.bidders = invalidTrace.bidders.slice(0, -1);
+  invalidTrace.keeper.reveals = invalidTrace.keeper.reveals.filter(
+    (r) => r !== dropped.label,
+  );
+
+  assert.throws(
+    () => assertDemoTrace(invalidTrace),
+    (error: unknown) => {
+      assert.ok(error instanceof DemoTraceHealthCheckError);
+      assert.match(error.message, /agent ".+" has no matching bidder record/);
+      return true;
+    },
+  );
+});
+
+test("a second settle record fails the checksum", () => {
+  const invalidTrace = structuredClone(DEMO_TRACE) as unknown as {
+    lifecycle: Array<unknown>;
+  };
+  const settle = invalidTrace.lifecycle.find(
+    (e) => isRecord(e) && e.phase === "settle",
+  ) as Record<string, unknown> | undefined;
+  assert.ok(settle, "canonical trace must contain a settle event");
+  invalidTrace.lifecycle.push(structuredClone(settle));
+
+  assert.throws(
+    () => assertDemoTrace(invalidTrace),
+    /lifecycle must include exactly one settle phase/,
+  );
+});
+
+test("duplicated bidder fails the checksum", () => {
+  const invalidTrace = structuredClone(DEMO_TRACE) as unknown as {
+    bidders: Array<unknown>;
+  };
+  invalidTrace.bidders.push(structuredClone(invalidTrace.bidders[0]));
+
+  assert.throws(
+    () => assertDemoTrace(invalidTrace),
+    /bidders must not contain duplicate labels/,
+  );
 });
