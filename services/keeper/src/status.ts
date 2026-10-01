@@ -37,6 +37,8 @@ export interface RoundStatusView {
   roundId: string;
   status: RoundStatus;
   phase: KeeperDryRunPhase;
+  cursor: number | string | null;
+  lastHash: string | null;
   nextAction: string;
   commitDeadline: number | null;
   revealDeadline: number | null;
@@ -142,7 +144,9 @@ export async function buildRoundStatus(
     return {
       roundId: ridStr,
       status: notFound ? "NotFound" : "Unknown",
-      phase: notFound ? "complete" : "awaiting-drand",
+      phase: watched?.phase ?? (notFound ? "complete" : "awaiting-drand"),
+      cursor: watched?.cursor ?? null,
+      lastHash: watched?.lastHash ?? null,
       nextAction: notFound ? "round does not exist" : "awaiting first keeper tick",
       commitDeadline: null,
       revealDeadline: null,
@@ -201,7 +205,9 @@ export async function buildRoundStatus(
   return {
     roundId: ridStr,
     status,
-    phase: phase.currentPhase,
+    phase: watched?.phase ?? phase.currentPhase,
+    cursor: watched?.cursor ?? null,
+    lastHash: watched?.lastHash ?? null,
     nextAction: phase.nextAction,
     commitDeadline,
     revealDeadline,

@@ -53,6 +53,10 @@ export type {
 } from "./errors.js";
 export {
   validateContractNetwork,
+  networkDisplayName,
+  networkPassphrasesMatch,
+  describeNetworkPassphraseMismatch,
+  SubRosaNetworkPassphraseMismatchError,
   type ContractNetworkValidationConfig,
   type NetworkValidationServer,
 } from "./network.js";
@@ -164,6 +168,8 @@ export {
   type KeeperStatusResponse,
   type KeeperHealthResponse,
   type ApiError,
+  type DashboardPhase,
+  type DashboardSnapshot,
 } from "./status.js";
 
 // Fetch client for the keeper status API.
@@ -171,6 +177,10 @@ export {
   KeeperStatusClient,
   StatusApiError,
   StatusJsonParseError,
+  KeeperStatusTimeoutError,
+  redactUrlUserinfo,
+  type KeeperReadiness,
+  type KeeperNotReadyReason,
   type StatusClientOptions,
   fetchKeeperStatus,
 } from "./status-client.js";

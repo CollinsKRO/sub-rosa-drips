@@ -38,6 +38,10 @@ export {
   fetchRoundBeacon,
   fetchRoundSignature,
   QUICKNET_HASH,
+  QUICKNET_GENESIS,
+  QUICKNET_PERIOD,
+  QUICKNET_FIXTURE,
+  assertQuicknetFixture,
   type DrandClient,
 } from "./quicknet.js";
 
@@ -60,6 +64,7 @@ export {
 } from "./seal.js";
 
 export {
+  computePublishAtMs,
   classifyDrandRound,
   DEFAULT_STALE_THRESHOLD_MS,
   type DrandRoundInfo,

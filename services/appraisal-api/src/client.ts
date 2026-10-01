@@ -107,8 +107,58 @@ export class AppraisalQuoteRefusalError extends X402PaymentError {
   }
 }
 
-export { MAX_APPRAISAL_BODY_BYTES };
+/** Typed error raised when a 402 challenge does not match the client's own request. */
+export class QuoteMismatchError extends Error {
+  readonly name = "QuoteMismatchError";
+  readonly reason: QuoteMismatchReason;
+  readonly status?: number;
 
+  constructor(reason: QuoteMismatchReason, status?: number) {
+    super(quoteMismatchMessage(reason));
+    this.reason = reason;
+    this.status = status;
+  }
+}
+
+export type QuoteMismatchReason =
+  | "empty-challenge"
+  | "expired"
+  | "asset-mismatch"
+  | "amount-mismatch"
+  | "destination-mismatch";
+
+function quoteMismatchMessage(reason: QuoteMismatchReason): string {
+  switch (reason) {
+    case "empty-challenge":
+      return "x402 challenge contained no payable quote";
+    case "expired":
+      return "x402 challenge expired before payment";
+    case "asset-mismatch":
+      return "x402 challenge asset does not match the requested asset";
+    case "amount-mismatch":
+      return "x402 challenge amount does not match the requested amount";
+    case "destination-mismatch":
+      return "x402 challenge destination does not match the requested destination";
+  }
+}
+
+/** The quote the client expects to pay for a given request. */
+export interface ExpectedQuote {
+  asset: string;
+  amount: bigint;
+  destination: string;
+  /** Unix seconds; the challenge must not be expired at payment time. */
+  expiresAt: number;
+}
+
+export interface PaidFetchOptions {
+  /** The quote this call is willing to pay. */
+  expectedQuote?: ExpectedQuote;
+  /** Override the clock used for expiry checks (tests). */
+  nowSeconds?: () => number;
+}
+
+export { MAX_APPRAISAL_BODY_BYTES };
 async function parseJsonResponse<T>(res: Response): Promise<T> {
   const text = await res.text();
   if (!text.trim()) {
@@ -119,6 +169,126 @@ async function parseJsonResponse<T>(res: Response): Promise<T> {
     return JSON.parse(text) as T;
   } catch (cause) {
     throw new AppraisalResponseParseError(res.status, { cause });
+  }
+}
+
+/** Normalize a quote amount (any number or string form) to bigint stroips. */
+function normalizeQuoteAmount(value: unknown): bigint | undefined {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) return undefined;
+    return BigInt(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) return undefined;
+    try {
+      return BigInt(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** Normalize an expiry timestamp to Unix seconds. */
+function normalizeExpiry(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return undefined;
+    // Millisecond epochs are common in JSON payloads; convert to seconds.
+    return value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) return undefined;
+    const num = Number(trimmed);
+    if (!Number.isFinite(num)) return undefined;
+    return num > 1e12 ? Math.floor(num / 1000) : Math.floor(num);
+  }
+  return undefined;
+}
+
+/** Find the first accepts entry that carries a payable quote. */
+function firstQuote(paymentRequired: PaymentRequired): Record<string, unknown> | undefined {
+  const accepts = (paymentRequired as { accepts?: unknown }).accepts;
+  if (!Array.isArray(accepts)) return undefined;
+  for (const entry of accepts) {
+    if (entry && typeof entry === "object") {
+      return entry as Record<string, unknown>;
+    }
+  }
+  return undefined;
+}
+
+function quoteAsset(entry: Record<string, unknown>): string | undefined {
+  const asset = entry.asset;
+  if (typeof asset === "string" && asset.trim() !== "") return asset;
+  const currency = entry.currency;
+  if (typeof currency === "string" && currency.trim() !== "") return currency;
+  return undefined;
+}
+
+function quoteDestination(entry: Record<string, unknown>): string | undefined {
+  for (const key of ["destination", "payTo", "pay_to", "recipient", "address"] as const) {
+    const value = entry[key];
+    if (typeof value === "string" && value.trim() !== "") return value;
+  }
+  return undefined;
+}
+
+function quoteAmount(entry: Record<string, unknown>): bigint | undefined {
+  for (const key of ["amount", "maxAmountRequired", "max_amount_required", "price", "value"] as const) {
+    const normalized = normalizeQuoteAmount(entry[key]);
+    if (normalized !== undefined) return normalized;
+  }
+  return undefined;
+}
+
+function quoteExpiry(entry: Record<string, unknown>): number | undefined {
+  for (const key of ["expiresAt", "expires_at", "expiration", "expires"] as const) {
+    const normalized = normalizeExpiry(entry[key]);
+    if (normalized !== undefined) return normalized;
+  }
+  return undefined;
+}
+
+/** Verify the 402 challenge against the quote the client requested. */
+export function assertChallengeMatchesQuote(
+  paymentRequired: PaymentRequired,
+  expected: ExpectedQuote,
+  nowSeconds: () => number = () => Math.floor(Date.now() / 1000),
+): void {
+  const entry = firstQuote(paymentRequired);
+  if (!entry) {
+    throw new QuoteMismatchError("empty-challenge");
+  }
+
+  const now = nowSeconds();
+  if (!Number.isFinite(now)) {
+    throw new QuoteMismatchError("expired");
+  }
+  if (expected.expiresAt <= now) {
+    throw new QuoteMismatchError("expired");
+  }
+
+  const challengeExpiry = quoteExpiry(entry);
+  if (challengeExpiry === undefined || challengeExpiry <= now) {
+    throw new QuoteMismatchError("expired");
+  }
+
+  const challengeAsset = quoteAsset(entry);
+  if (challengeAsset === undefined || challengeAsset !== expected.asset) {
+    throw new QuoteMismatchError("asset-mismatch");
+  }
+
+  const challengeAmount = quoteAmount(entry);
+  if (challengeAmount === undefined || challengeAmount !== expected.amount) {
+    throw new QuoteMismatchError("amount-mismatch");
+  }
+
+  const challengeDestination = quoteDestination(entry);
+  if (challengeDestination === undefined || challengeDestination !== expected.destination) {
+    throw new QuoteMismatchError("destination-mismatch");
   }
 }
 
@@ -297,7 +467,6 @@ export function assertPaymentQuoteAllowed(
     }
   }
 }
-
 /** Build a paid-fetch function bound to a payer wallet. */
 export function createPaidFetch(config: PaidClientConfig) {
   const network = config.network ?? "stellar:testnet";
@@ -312,6 +481,7 @@ export function createPaidFetch(config: PaidClientConfig) {
   return async function paidFetch<T = unknown>(
     url: string,
     init: RequestInit = {},
+    options: PaidFetchOptions = {},
   ): Promise<PaidResult<T>> {
     // Probe path tolerates a missing body (generic GETs, legacy callers);
     // oversized / credential-like bodies still fail here with no payment.
@@ -341,11 +511,15 @@ export function createPaidFetch(config: PaidClientConfig) {
         bodyForParse,
       );
     } catch {
-      throw new X402PaymentError(
-        `x402 payment required response was invalid (${first.status})`,
-        first.status,
-      );
+      throw new QuoteMismatchError("empty-challenge", first.status);
     }
+
+    // Bind the payment to the quote this call requested. A changed asset,
+    // amount, destination, or expiry must not be paid.
+    if (!options.expectedQuote) {
+      throw new QuoteMismatchError("empty-challenge", first.status);
+    }
+    assertChallengeMatchesQuote(paymentRequired, options.expectedQuote, options.nowSeconds);
 
     // Bind the quote to the mandate before any Stellar transfer.
     if (config.expectedQuote) {
