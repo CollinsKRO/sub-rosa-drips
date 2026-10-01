@@ -8,7 +8,7 @@ use soroban_sdk::testutils::storage::Temporary as TemporaryStorageTest;
 
 use crate::drand;
 use crate::storage::{seal_ttl_for_reveal_deadline, TEMP_THRESHOLD};
-use crate::types::{ClearingRule, DataKey, Error, GlobalConfig, Status};
+use crate::types::{ClearingRule, DataKey, Error, GlobalConfig, RoundAssetConfig, Status};
 use crate::{SubRosaRound, SubRosaRoundClient};
 
 // ── Dummy fixture (no BLS) — only for tests that never call open_reveal ──────
@@ -140,6 +140,7 @@ fn drand_round(f: &Fixture, operator: &Address, commit_deadline: u64, reveal_dea
         &commit_deadline,
         &reveal_deadline,
         &Bytes::from_array(&f.env, b"auditor"),
+        &sac_asset_config(&f.env),
     )
 }
 
@@ -159,7 +160,24 @@ fn b32(env: &Env, byte: u8) -> BytesN<32> {
     BytesN::from_array(env, &[byte; 32])
 }
 
+fn sac_asset_config(env: &Env) -> RoundAssetConfig {
+    RoundAssetConfig {
+        asset_type: soroban_sdk::String::from_str(env, "sac"),
+        contract_id: soroban_sdk::String::from_str(
+            env,
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        ),
+        code: soroban_sdk::String::from_str(env, "USDC"),
+        decimals: 7,
+        issuer: soroban_sdk::String::from_str(
+            env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ),
+    }
+}
+
 fn open_round(f: &Fixture, operator: &Address) -> u64 {
+    let asset_config = sac_asset_config(&f.env);
     f.client.create_round(
         operator,
         &b32(&f.env, 1),
@@ -168,6 +186,7 @@ fn open_round(f: &Fixture, operator: &Address) -> u64 {
         &1_500,
         &2_500,
         &Bytes::from_array(&f.env, b"auditor-pubkey"),
+        &asset_config,
     )
 }
 
@@ -294,7 +313,8 @@ fn create_round_rejects_commit_after_reveal() {
     let operator = Address::generate(&f.env);
     let res = f.client.try_create_round(
         &operator, &b32(&f.env, 1), &2_000, &ClearingRule::HighestBid,
-        &2_000, &2_500, &Bytes::from_array(&f.env, b"a"),
+        &2_000, &2_500,        &Bytes::from_array(&f.env, b"a"),
+        &sac_asset_config(&f.env),
     );
     assert!(res.is_err());
 }
@@ -305,7 +325,8 @@ fn create_round_rejects_deadline_in_past() {
     let operator = Address::generate(&f.env);
     let res = f.client.try_create_round(
         &operator, &b32(&f.env, 1), &2_000, &ClearingRule::HighestBid,
-        &500, &2_500, &Bytes::from_array(&f.env, b"a"),
+        &500, &2_500,        &Bytes::from_array(&f.env, b"a"),
+        &sac_asset_config(&f.env),
     );
     assert!(res.is_err());
 }
@@ -940,21 +961,112 @@ fn seeded_case_7_lowest_bid_reproducible() {
 // REAL DRAND VECTOR TESTS (preserved verbatim)
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[test]
-fn drand_bls_verify_real_vector() {
-    let env = Env::default();
-    let sig = hexn::<96>(&env, VEC_SIG_G1);
-    let cfg = config_with(&env, VEC_PUBKEY_C1C0, VEC_NEGGEN_C1C0);
-    assert!(drand::verify_round(&env, &cfg, VEC_ROUND, &sig),
-        "c1c0-ordered constants must verify the live quicknet signature on-chain");
+// #[test]
+// fn drand_bls_verify_real_vector() {
+//     let env = Env::default();
+//     let sig = hexn::<96>(&env, VEC_SIG_G1);
+//     let cfg = config_with(&env, VEC_PUBKEY_C1C0, VEC_NEGGEN_C1C0);
+//     assert!(drand::verify_round(&env, &cfg, VEC_ROUND, &sig),
+//         "c1c0-ordered constants must verify the live quicknet signature on-chain");
+// }
+
+// #[test]
+// fn drand_bls_verify_rejects_wrong_round() {
+//     let env = Env::default();
+//     let sig = hexn::<96>(&env, VEC_SIG_G1);
+//     let cfg = config_with(&env, VEC_PUBKEY_C1C0, VEC_NEGGEN_C1C0);
+//     assert!(!drand::verify_round(&env, &cfg, VEC_ROUND + 1, &sig));
+// }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SHARED DRAND VECTOR TESTS (Issue #404)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn get_vector_json() -> &'static str {
+    include_str!("../../../services/drand-tools/src/drand_vectors.json")
+}
+
+fn get_json_string<'a>(json: &'a str, key_pattern: &str) -> &'a str {
+    let start = json
+        .find(key_pattern)
+        .unwrap_or_else(|| panic!("pattern {} not found", key_pattern))
+        + key_pattern.len();
+    let mut val = &json[start..];
+    val = val.trim_start();
+    if val.starts_with('"') {
+        val = &val[1..];
+        let end = val.find('"').unwrap();
+        &val[..end]
+    } else {
+        let end = val
+            .find(|c: char| c == ',' || c == '\n' || c == '}')
+            .unwrap_or(val.len());
+        val[..end].trim()
+    }
+}
+
+fn get_json_u64(json: &str, key_pattern: &str) -> u64 {
+    get_json_string(json, key_pattern).parse().unwrap()
 }
 
 #[test]
-fn drand_bls_verify_rejects_wrong_round() {
+fn shared_vector_accepted_on_both_sides() {
     let env = Env::default();
-    let sig = hexn::<96>(&env, VEC_SIG_G1);
-    let cfg = config_with(&env, VEC_PUBKEY_C1C0, VEC_NEGGEN_C1C0);
-    assert!(!drand::verify_round(&env, &cfg, VEC_ROUND + 1, &sig));
+    let json = get_vector_json();
+
+    let round = get_json_u64(json, "\"round\":");
+    let sig_g1 = get_json_string(json, "\"sig_g1\":");
+    let pubkey = get_json_string(json, "\"pubkey_c1c0\":");
+    let neggen = get_json_string(json, "\"neggen_c1c0\":");
+
+    let sig = hexn::<96>(&env, sig_g1);
+    let cfg = config_with(&env, pubkey, neggen);
+
+    assert!(
+        drand::verify_round(&env, &cfg, round, &sig),
+        "valid offline vector must be accepted"
+    );
+}
+
+#[test]
+fn shared_vector_wrong_round_rejected() {
+    let env = Env::default();
+    let json = get_vector_json();
+
+    let sig_g1 = get_json_string(json, "\"sig_g1\":");
+    let pubkey = get_json_string(json, "\"pubkey_c1c0\":");
+    let neggen = get_json_string(json, "\"neggen_c1c0\":");
+    let wrong_round = get_json_u64(json, "\"invalidWrongRound\":");
+
+    let sig = hexn::<96>(&env, sig_g1);
+    let cfg = config_with(&env, pubkey, neggen);
+
+    assert!(
+        !drand::verify_round(&env, &cfg, wrong_round, &sig),
+        "wrong round offline vector must be rejected"
+    );
+}
+
+#[test]
+#[should_panic(expected = "hex length mismatch")]
+fn shared_vector_truncated_signature_rejected() {
+    let env = Env::default();
+    let json = get_vector_json();
+    let trunc_sig = get_json_string(json, "\"invalidTruncatedSignature\":");
+
+    // The ABI strictly requires exactly 96 bytes. This mirrors the Soroban VM 
+    // rejecting the transaction during argument conversion before open_reveal runs.
+    hexn::<96>(&env, trunc_sig);
+}
+
+#[test]
+#[should_panic(expected = "hex length mismatch")]
+fn shared_vector_empty_signature_rejected() {
+    let env = Env::default();
+    let json = get_vector_json();
+    let empty_sig = get_json_string(json, "\"invalidEmptySignature\":");
+    
+    hexn::<96>(&env, empty_sig);
 }
 
 fn setup_real_drand() -> Fixture {
@@ -995,6 +1107,7 @@ fn full_lifecycle_real_drand_signature() {
     let id = f.client.create_round(
         &operator, &b32(&f.env, 0xAB), &VEC_ROUND, &ClearingRule::HighestBid,
         &commit_deadline, &reveal_deadline, &Bytes::from_array(&f.env, b"auditor"),
+        &sac_asset_config(&f.env),
     );
 
     let alice = funded_bidder(&f, 1_000);
@@ -1056,52 +1169,53 @@ fn get_bidders_page_empty() {
     let f = setup();
     let operator = Address::generate(&f.env);
     let id = open_round(&f, &operator);
-    let page = f.client.get_bidders_page(&id, &0, &10);
+    let page = f.client.get_bidders_page(&id, &None, &10);
     assert_eq!(page.data.len(), 0);
-    assert_eq!(page.next_cursor, 0);
+    assert!(page.next_cursor.is_none()); assert!(!page.has_more);
     assert_eq!(page.total, 0);
 }
 
 #[test]
 fn get_bidders_page_partial() {
     let (f, id, _) = round_with_n_bidders(5);
-    let page = f.client.get_bidders_page(&id, &0, &3);
+    let page = f.client.get_bidders_page(&id, &None, &3);
     assert_eq!(page.data.len(), 3);
-    assert_eq!(page.next_cursor, 3);
+    assert!(page.next_cursor.is_some()); assert!(page.has_more);
     assert_eq!(page.total, 5);
 }
 
 #[test]
 fn get_bidders_page_exact() {
     let (f, id, _) = round_with_n_bidders(3);
-    let page = f.client.get_bidders_page(&id, &0, &3);
+    let page = f.client.get_bidders_page(&id, &None, &3);
     assert_eq!(page.data.len(), 3);
-    assert_eq!(page.next_cursor, 0);
+    assert!(page.next_cursor.is_none()); assert!(!page.has_more);
     assert_eq!(page.total, 3);
 }
 
 #[test]
 fn get_bidders_page_final() {
     let (f, id, _) = round_with_n_bidders(5);
-    let page = f.client.get_bidders_page(&id, &3, &3);
+    let first = f.client.get_bidders_page(&id, &None, &3);
+    let page = f.client.get_bidders_page(&id, &first.next_cursor, &3);
     assert_eq!(page.data.len(), 2);
-    assert_eq!(page.next_cursor, 0);
+    assert!(page.next_cursor.is_none()); assert!(!page.has_more);
     assert_eq!(page.total, 5);
 }
 
 #[test]
 fn get_bidders_page_multi() {
     let (f, id, all) = round_with_n_bidders(10);
-    let p1 = f.client.get_bidders_page(&id, &0, &4);
-    assert_eq!(p1.data.len(), 4); assert_eq!(p1.next_cursor, 4); assert_eq!(p1.total, 10);
+    let p1 = f.client.get_bidders_page(&id, &None, &4);
+    assert_eq!(p1.data.len(), 4); assert!(p1.next_cursor.is_some()); assert!(p1.has_more); assert_eq!(p1.total, 10);
     assert_eq!(p1.data.get(0).unwrap(), all.get(0).unwrap());
     assert_eq!(p1.data.get(3).unwrap(), all.get(3).unwrap());
     let p2 = f.client.get_bidders_page(&id, &p1.next_cursor, &4);
-    assert_eq!(p2.data.len(), 4); assert_eq!(p2.next_cursor, 8);
+    assert_eq!(p2.data.len(), 4); assert!(p2.next_cursor.is_some()); assert!(p2.has_more);
     assert_eq!(p2.data.get(0).unwrap(), all.get(4).unwrap());
     assert_eq!(p2.data.get(3).unwrap(), all.get(7).unwrap());
     let p3 = f.client.get_bidders_page(&id, &p2.next_cursor, &4);
-    assert_eq!(p3.data.len(), 2); assert_eq!(p3.next_cursor, 0);
+    assert_eq!(p3.data.len(), 2); assert!(p3.next_cursor.is_none()); assert!(!p3.has_more);
     assert_eq!(p3.data.get(0).unwrap(), all.get(8).unwrap());
     assert_eq!(p3.data.get(1).unwrap(), all.get(9).unwrap());
 }
@@ -1111,7 +1225,7 @@ fn get_bidders_page_rejects_limit_zero() {
     let f = setup();
     let operator = Address::generate(&f.env);
     let id = open_round(&f, &operator);
-    assert!(f.client.try_get_bidders_page(&id, &0, &0).is_err());
+    assert!(f.client.try_get_bidders_page(&id, &None, &0).is_err());
 }
 
 #[test]
@@ -1119,32 +1233,35 @@ fn get_bidders_page_rejects_limit_over_max() {
     let f = setup();
     let operator = Address::generate(&f.env);
     let id = open_round(&f, &operator);
-    assert!(f.client.try_get_bidders_page(&id, &0, &101).is_err());
+    assert!(f.client.try_get_bidders_page(&id, &None, &101).is_err());
 }
 
 #[test]
 fn get_bidders_page_cursor_at_total() {
     let (f, id, _) = round_with_n_bidders(3);
-    let page = f.client.get_bidders_page(&id, &3, &5);
-    assert_eq!(page.data.len(), 0); assert_eq!(page.next_cursor, 0); assert_eq!(page.total, 3);
+    let first = f.client.get_bidders_page(&id, &None, &3);
+    assert!(!first.has_more);
+    assert!(first.next_cursor.is_none());
 }
 
 #[test]
 fn get_bidders_page_cursor_beyond_total() {
     let (f, id, _) = round_with_n_bidders(3);
-    let page = f.client.get_bidders_page(&id, &10, &5);
-    assert_eq!(page.data.len(), 0); assert_eq!(page.next_cursor, 0); assert_eq!(page.total, 3);
+    assert_try_contract_err(
+        f.client.try_get_bidders_page(&id, &Some(Bytes::from_array(&f.env, &[1; 41])), &5),
+        Error::InvalidCursor,
+    );
 }
 
 #[test]
 fn get_bidders_page_preserves_order() {
     let (f, id, all) = round_with_n_bidders(5);
     let mut collected = Vec::new(&f.env);
-    let mut cursor: u32 = 0;
+    let mut cursor = None;
     loop {
         let page = f.client.get_bidders_page(&id, &cursor, &2);
         for i in 0..page.data.len() { collected.push_back(page.data.get(i).unwrap()); }
-        if page.next_cursor == 0 { break; }
+        if !page.has_more { break; }
         cursor = page.next_cursor;
     }
     assert_eq!(collected.len(), 5);
@@ -1390,7 +1507,7 @@ pub(super) const DOCUMENTED_ERROR_CODES: &[(Error, u32)] = &[
     (Error::RoundVoided, 20),
     (Error::NotVoidable, 21),
     (Error::WrongStatus, 22),
-    // ── 30–39: cryptography & validation ──
+    // ── 30–40: cryptography & validation ──
     (Error::InvalidDrandSignature, 30),
     (Error::HashMismatch, 31),
     (Error::AlreadyRevealed, 32),
@@ -1401,6 +1518,7 @@ pub(super) const DOCUMENTED_ERROR_CODES: &[(Error, u32)] = &[
     (Error::NoValidBids, 37),
     (Error::RoundFull, 38),
     (Error::InvalidLimit, 39),
+    (Error::InvalidCursor, 40),
 ];
 
 /// Convert an `Error` to its on-chain discriminant using the [`repr(u32)`]
@@ -1439,6 +1557,7 @@ pub(super) fn variant_name(e: Error) -> &'static str {
         Error::NoValidBids => "NoValidBids",
         Error::RoundFull => "RoundFull",
         Error::InvalidLimit => "InvalidLimit",
+        Error::InvalidCursor => "InvalidCursor",
     }
 }
 
@@ -1459,7 +1578,7 @@ fn error_discriminants_match_document() {
 
 #[test]
 fn error_codes_have_no_duplicate_discriminants() {
-    // O(n²) is fine: n = 27. Done without `std::collections` because the
+    // O(n²) is fine: n = 28. Done without `std::collections` because the
     // contract's `#![no_std]` applies to this module.
     for (i, (variant_a, code_a)) in DOCUMENTED_ERROR_CODES.iter().enumerate() {
         let name_a = variant_name(*variant_a);
@@ -1486,7 +1605,7 @@ fn error_table_enumerates_every_variant() {
     // DOCUMENTED_ERROR_CODES.
     assert_eq!(
         DOCUMENTED_ERROR_CODES.len(),
-        27,
+        28,
         "DOCUMENTED_ERROR_CODES appears missing entries. The exhaustive \
          `variant_name` match already enforces parity at compile time — \
          update it together with this list and contracts/round/ERRORS.md."
@@ -1498,16 +1617,142 @@ fn error_codes_use_reserved_ranges() {
     // Range policy enforced by the documentation:
     //   1–4     → initialization/lookup
     //   10–22   → lifecycle/timing
-    //   30–39   → crypto/validation
+    //   30–40   → crypto/validation
     // New categories should pick a fresh, contiguous range — not collide with
     // logging conventions — and update ERRORS.md at the same time.
     for (variant, code) in DOCUMENTED_ERROR_CODES {
         let name = variant_name(*variant);
-        let in_range = matches!(*code, 1..=4 | 10..=22 | 30..=39);
+        let in_range = matches!(*code, 1..=4 | 10..=22 | 30..=40);
         assert!(
             in_range,
             "{name} = {code} falls outside the documented code ranges; \
              update contracts/round/ERRORS.md if you intentionally added a new category"
         );
     }
+}
+
+fn shared_pagination_round() -> (Fixture, u64, Vec<Address>) {
+    let f = setup();
+    let id = open_round(&f, &Address::generate(&f.env));
+    let mut bidders = Vec::new(&f.env);
+    for (i, line) in include_str!("../../../fixtures/bidder-pagination.txt")
+        .lines()
+        .enumerate()
+    {
+        let bidder = Address::from_string(&soroban_sdk::String::from_str(&f.env, line));
+        f.usdc_admin.mint(&bidder, &1000);
+        f.client.commit(
+            &id,
+            &bidder,
+            &b32(&f.env, i as u8),
+            &Bytes::from_array(&f.env, b"c"),
+            &100,
+            &Bytes::new(&f.env),
+        );
+        bidders.push_back(bidder);
+    }
+    (f, id, bidders)
+}
+
+#[test]
+fn bidder_cursor_shared_fixture_three_pages() {
+    let (f, id, expected) = shared_pagination_round();
+    let mut cursor = None;
+    let mut all = Vec::new(&f.env);
+    let mut pages = 0;
+    loop {
+        let page = f.client.get_bidders_page(&id, &cursor, &3);
+        pages += 1;
+        assert_eq!(page.total, expected.len());
+        for bidder in page.data.iter() {
+            all.push_back(bidder);
+        }
+        if !page.has_more {
+            assert!(page.next_cursor.is_none());
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    assert_eq!(pages, 3);
+    assert_eq!(all, expected);
+}
+
+#[test]
+fn bidder_cursor_rejects_tampering_and_foreign_scope() {
+    let (f, id, _) = shared_pagination_round();
+    let cursor = f
+        .client
+        .get_bidders_page(&id, &None, &3)
+        .next_cursor
+        .unwrap();
+    // Every token byte is covered, including the version, offset, and count.
+    for i in 0..cursor.len() {
+        let mut tampered = cursor.clone();
+        tampered.set(i, tampered.get(i).unwrap() ^ 1);
+        assert_try_contract_err(
+            f.client.try_get_bidders_page(&id, &Some(tampered), &3),
+            Error::InvalidCursor,
+        );
+    }
+    for len in [0, 1, 40, 42] {
+        assert_try_contract_err(
+            f.client.try_get_bidders_page(
+                &id,
+                &Some(Bytes::from_slice(&f.env, &[1; 42][..len])),
+                &3,
+            ),
+            Error::InvalidCursor,
+        );
+    }
+    let other_id = open_round(&f, &Address::generate(&f.env));
+    assert_try_contract_err(
+        f.client
+            .try_get_bidders_page(&other_id, &Some(cursor.clone()), &3),
+        Error::InvalidCursor,
+    );
+    let other = f.env.register(
+        SubRosaRound,
+        (
+            BytesN::from_array(&f.env, &[0u8; 192]),
+            BytesN::from_array(&f.env, &[0u8; 192]),
+            Bytes::new(&f.env),
+            GENESIS,
+            PERIOD,
+            f.usdc_token.address.clone(),
+        ),
+    );
+    f.env.as_contract(&other, || {
+        let round = f.env.as_contract(&f.client.address, || {
+            crate::storage::get_round(&f.env, id).unwrap()
+        });
+        crate::storage::set_round(&f.env, id, &round);
+    });
+    assert_try_contract_err(
+        SubRosaRoundClient::new(&f.env, &other).try_get_bidders_page(&id, &Some(cursor), &3),
+        Error::InvalidCursor,
+    );
+}
+
+#[test]
+fn bidder_cursor_snapshot_survives_append_and_overwrite() {
+    let (f, id, expected) = shared_pagination_round();
+    let first = f.client.get_bidders_page(&id, &None, &3);
+    let newcomer = funded_bidder(&f, 1000);
+    for bidder in [newcomer, expected.get(0).unwrap()] {
+        f.client.commit(
+            &id,
+            &bidder,
+            &b32(&f.env, 9),
+            &Bytes::from_array(&f.env, b"c"),
+            &100,
+            &Bytes::new(&f.env),
+        );
+    }
+    let second = f.client.get_bidders_page(&id, &first.next_cursor, &3);
+    let third = f.client.get_bidders_page(&id, &second.next_cursor, &3);
+    assert_eq!(third.total, 7);
+    assert_eq!(third.data.len(), 1);
+    assert_eq!(third.data.get(0), expected.get(6));
+    assert!(!third.has_more);
+    assert_eq!(f.client.get_bidders_page(&id, &None, &100).total, 8);
 }

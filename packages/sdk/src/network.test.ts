@@ -82,6 +82,30 @@ describe("validateContractNetwork", () => {
     );
   });
 
+  it("labels known and custom network passphrases", () => {
+    assert.equal(networkDisplayName(TESTNET), "Testnet");
+    assert.equal(networkDisplayName(PUBLIC), "Public");
+    assert.equal(networkDisplayName("Futurenet"), "Futurenet");
+    assert.equal(networkDisplayName("Custom Network"), "Custom Network");
+    assert.equal(networkDisplayName("   "), "an unknown network");
+  });
+
+  it("matches passphrases after trimming", () => {
+    assert.equal(networkPassphrasesMatch(TESTNET, ` ${TESTNET} `), true);
+    assert.equal(networkPassphrasesMatch(TESTNET, PUBLIC), false);
+  });
+
+  it("names both networks on a passphrase mismatch without exposing a secret", () => {
+    const error = new SubRosaNetworkPassphraseMismatchError(PUBLIC, TESTNET);
+    assert.equal(error.chainNetwork, "Public");
+    assert.equal(error.sdkNetwork, "Testnet");
+    assert.equal(error.message, describeNetworkPassphraseMismatch(PUBLIC, TESTNET));
+    assert.match(error.message, /Public/);
+    assert.match(error.message, /Testnet/);
+    assert.doesNotMatch(error.message, /\bS[A-Z2-7]{55}\b/);
+    assert.doesNotMatch(error.message, /AAAA/);
+  });
+
   it("does not look up the contract after a passphrase mismatch", async () => {
     let ledgerLookups = 0;
     const mock = server(PUBLIC);
