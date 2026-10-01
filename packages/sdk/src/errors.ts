@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: MIT
+import type {
+  EscrowConservationPhase,
+  EscrowConservationReport,
+} from "./conservation.js";
+
 export class SubRosaClientConfigError extends Error {
   readonly name = "SubRosaClientConfigError";
 
@@ -7,42 +12,81 @@ export class SubRosaClientConfigError extends Error {
   }
 }
 
+export type NetworkMismatchReason =
+  | "passphrase"
+  | "contract_not_found"
+  | "contract_mismatch"
+  | "account_mismatch"
+  | "session_mismatch";
+
 export interface NetworkMismatchErrorParams {
   contractId: string;
   configuredPassphrase: string;
-  rpcPassphrase: string;
-  rpcUrl: string;
-  reason: "passphrase" | "contract_not_found";
+  rpcPassphrase?: string;
+  rpcUrl?: string;
+  reason: NetworkMismatchReason;
+  sessionContractId?: string;
+  sessionPassphrase?: string;
+  sessionAccount?: string;
+  expectedAccount?: string;
 }
 
-/** Raised before contract simulation/signing when network configuration conflicts. */
+/** Raised before contract simulation/signing when network configuration or session binding conflicts. */
 export class SubRosaNetworkMismatchError extends Error {
-  readonly name = "SubRosaNetworkMismatchError";
+  readonly name: string = "SubRosaNetworkMismatchError";
   readonly contractId: string;
   readonly configuredPassphrase: string;
-  readonly rpcPassphrase: string;
-  readonly rpcUrl: string;
+  readonly rpcPassphrase?: string;
+  readonly rpcUrl?: string;
   readonly reason: NetworkMismatchErrorParams["reason"];
+  readonly sessionContractId?: string;
+  readonly sessionPassphrase?: string;
+  readonly sessionAccount?: string;
+  readonly expectedAccount?: string;
 
   constructor(params: NetworkMismatchErrorParams) {
-    const message =
-      params.reason === "passphrase"
-        ? `networkPassphrase ${JSON.stringify(params.configuredPassphrase)} does not match RPC network ${JSON.stringify(params.rpcPassphrase)} at ${params.rpcUrl}; use the passphrase and contract ID from the same deployment`
-        : `contract ${params.contractId} was not found on RPC network ${JSON.stringify(params.rpcPassphrase)} at ${params.rpcUrl}; check that contractId and networkPassphrase refer to the same deployment`;
+    let rawMessage: string;
+    if (params.reason === "passphrase") {
+      rawMessage = `networkPassphrase ${JSON.stringify(params.configuredPassphrase)} does not match RPC network ${JSON.stringify(params.rpcPassphrase)} at ${params.rpcUrl}; use the passphrase and contract ID from the same deployment`;
+    } else if (params.reason === "contract_not_found") {
+      rawMessage = `contract ${params.contractId} was not found on RPC network ${JSON.stringify(params.rpcPassphrase)} at ${params.rpcUrl}; check that contractId and networkPassphrase refer to the same deployment`;
+    } else if (params.reason === "contract_mismatch") {
+      rawMessage = `passkey session contract ${params.sessionContractId ?? params.contractId} does not match client contract ${params.contractId}; refuse commit across different contracts`;
+    } else if (params.reason === "account_mismatch") {
+      rawMessage = `passkey session account ${params.sessionAccount} does not match client account ${params.expectedAccount}; refuse commit for different account`;
+    } else {
+      rawMessage = `passkey session network ${JSON.stringify(params.sessionPassphrase ?? params.configuredPassphrase)} does not match client network ${JSON.stringify(params.configuredPassphrase)}; refuse commit across different networks`;
+    }
+
+    // Keep secret seeds strictly out of error text
+    const message = rawMessage.replace(/\bS[A-Z2-7]{55}\b/g, "[REDACTED]");
     super(message);
     this.contractId = params.contractId;
     this.configuredPassphrase = params.configuredPassphrase;
     this.rpcPassphrase = params.rpcPassphrase;
     this.rpcUrl = params.rpcUrl;
     this.reason = params.reason;
+    this.sessionContractId = params.sessionContractId;
+    this.sessionPassphrase = params.sessionPassphrase;
+    this.sessionAccount = params.sessionAccount;
+    this.expectedAccount = params.expectedAccount;
   }
+}
+
+/** Specific typed error for passkey session binding mismatches. Inherits from SubRosaNetworkMismatchError. */
+export class SubRosaSessionMismatchError extends SubRosaNetworkMismatchError {
+  override readonly name = "SubRosaSessionMismatchError";
 }
 
 export class SubRosaSubmitError extends Error {
   readonly name = "SubRosaSubmitError";
+  readonly retryable?: boolean;
 
-  constructor(message: string, options?: ErrorOptions) {
+  constructor(message: string, options?: ErrorOptions & { retryable?: boolean }) {
     super(message, options);
+    if (options?.retryable !== undefined) {
+      this.retryable = options.retryable;
+    }
   }
 }
 
@@ -50,11 +94,15 @@ export class SubRosaTransactionError extends Error {
   readonly name = "SubRosaTransactionError";
   readonly hash: string;
   readonly status: string;
+  readonly retryable?: boolean;
 
-  constructor(hash: string, status: string, options?: ErrorOptions) {
+  constructor(hash: string, status: string, options?: ErrorOptions & { retryable?: boolean }) {
     super(`transaction ${hash} ended with status ${status}`, options);
     this.hash = hash;
     this.status = status;
+    if (options?.retryable !== undefined) {
+      this.retryable = options.retryable;
+    }
   }
 }
 
@@ -76,12 +124,22 @@ export interface TimeoutErrorParams {
   pollIntervalMs: number;
 }
 
+
+export class SubRosaAssetValidationError extends Error {
+  readonly name = "SubRosaAssetValidationError";
+
+  constructor(readonly field: string, message: string) {
+    super(`${field}: ${message}`);
+  }
+}
+
 export type PreflightFailureKind =
   | "rpc_error"
   | "simulation_error"
   | "expired_state"
   | "contract_error"
-  | "malformed_response";
+  | "malformed_response"
+  | "escrow_not_conserved";
 
 export interface SubRosaPreflightErrorParams {
   kind: PreflightFailureKind;
@@ -91,6 +149,7 @@ export interface SubRosaPreflightErrorParams {
   contractErrorCode?: number;
   contractErrorMessage?: string;
   restoreMinResourceFee?: bigint;
+  retryable?: boolean;
   cause?: unknown;
 }
 
@@ -103,6 +162,7 @@ export class SubRosaPreflightError extends Error {
   readonly contractErrorCode?: number;
   readonly contractErrorMessage?: string;
   readonly restoreMinResourceFee?: bigint;
+  readonly retryable: boolean;
 
   constructor(params: SubRosaPreflightErrorParams) {
     super(params.message, params.cause ? { cause: params.cause } : undefined);
@@ -112,6 +172,53 @@ export class SubRosaPreflightError extends Error {
     this.contractErrorCode = params.contractErrorCode;
     this.contractErrorMessage = params.contractErrorMessage;
     this.restoreMinResourceFee = params.restoreMinResourceFee;
+    this.retryable =
+      params.retryable ??
+      (params.kind === "contract_error"
+        ? isRoundContractErrorRetryable(params.contractErrorCode ?? params.contractErrorMessage)
+        : false);
+  }
+}
+
+export interface EscrowConservationErrorParams {
+  roundId: bigint;
+  /** The operation whose escrow accounting failed to balance. */
+  phase: EscrowConservationPhase;
+  report: EscrowConservationReport;
+  cause?: unknown;
+}
+
+/**
+ * Typed error for a round whose escrow does not reconcile before payout.
+ *
+ * The Round contract refuses to `settle` or `void` such a round with
+ * `EscrowNotConserved`; this error is the off-chain equivalent, raised before
+ * any transaction is built, so a keeper can halt instead of burning a fee.
+ */
+export class SubRosaEscrowConservationError extends SubRosaPreflightError {
+  readonly roundId: bigint;
+  readonly phase: EscrowConservationPhase;
+  readonly report: EscrowConservationReport;
+
+  constructor(params: EscrowConservationErrorParams) {
+    const stranded = params.report.stranded;
+    const summary = params.report.issues
+      .slice(0, 3)
+      .map((i) => i.message)
+      .join("; ");
+    super({
+      kind: "escrow_not_conserved",
+      operation: params.phase,
+      message:
+        `round ${params.roundId} does not conserve escrow before ${params.phase}: ` +
+        `held ${params.report.escrowHeld}, pays ${params.report.payable}, ` +
+        `refunds ${params.report.refundable}, strands ${stranded}` +
+        (summary ? ` (${summary})` : ""),
+      cause: params.cause,
+    });
+    this.roundId = params.roundId;
+    this.phase = params.phase;
+    this.report = params.report;
   }
 }
 

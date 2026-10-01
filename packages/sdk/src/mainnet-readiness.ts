@@ -309,6 +309,101 @@ export function assertMicroAmounts(
   }
 }
 
+/**
+ * Parse an optional micro-runner amount from the environment.
+ *
+ * Returns `fallback` when unset/blank and refuses values that are not plain
+ * positive integer stroops (e.g. `1.5`, `1e3`, `0x10`, `-1`) or that exceed the
+ * committed escrow cap. Kept pure so it can be unit-tested without env access.
+ */
+export function parseMicroStroops(
+  name: string,
+  raw: string | undefined,
+  fallback: bigint,
+  maxEscrow: bigint = MAINNET_MICRO_MAX_ESCROW,
+): bigint {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(
+      `${name} must be an integer stroop amount, got ${JSON.stringify(raw)}`,
+    );
+  }
+  const value = BigInt(trimmed);
+  if (value <= 0n) {
+    throw new Error(`${name} must be a positive stroop amount`);
+  }
+  if (value > maxEscrow) {
+    throw new Error(
+      `${name}=${value} exceeds MAINNET_MICRO_MAX_ESCROW (${maxEscrow})`,
+    );
+  }
+  return value;
+}
+
+export type MicroRunAction = "dry-run" | "send";
+
+export interface MicroRunDecision {
+  action: MicroRunAction;
+  bidStroops: bigint;
+  escrowStroops: bigint;
+}
+
+export interface MicroRunnerGateDeps {
+  /** Explicit `--execute` flag. Without it the runner defaults to dry-run. */
+  execute: boolean;
+  bidStroops: bigint;
+  escrowStroops: bigint;
+  /** Strict readiness checks. Only invoked for a real send. */
+  runReadiness: () => Promise<ReadinessCheck[]>;
+  /** Builds and submits on-chain work. Only invoked once the gate passes. */
+  submit: () => Promise<void>;
+  /** Env used for the confirmation phrase; defaults to `process.env`. */
+  env?: Record<string, string | undefined>;
+  /** Override the escrow ceiling (tests). */
+  maxEscrowStroops?: bigint;
+}
+
+/**
+ * Single gate in front of the mainnet micro runner.
+ *
+ * Ordering is deliberate so a broadcast can never happen unless every
+ * precondition holds:
+ *   1. amounts are positive integer stroops within the committed cap,
+ *   2. `MAINNET_CONFIRM` is set (send path only),
+ *   3. the strict readiness checks pass,
+ *   4. only then is `submit` invoked.
+ *
+ * Dry-run short-circuits before readiness, so it stays offline and never asks
+ * for a secret. `runReadiness` and `submit` are injected so the gate can be
+ * unit-tested without touching mainnet.
+ */
+export async function runMicroRunnerGate(
+  deps: MicroRunnerGateDeps,
+): Promise<MicroRunDecision> {
+  const maxEscrow = deps.maxEscrowStroops ?? MAINNET_MICRO_MAX_ESCROW;
+  assertMicroAmounts(deps.bidStroops, deps.escrowStroops, maxEscrow);
+
+  const decision: MicroRunDecision = {
+    action: "dry-run",
+    bidStroops: deps.bidStroops,
+    escrowStroops: deps.escrowStroops,
+  };
+
+  if (!deps.execute) {
+    return decision;
+  }
+
+  assertMainnetConfirmed(deps.env);
+
+  const checks = await deps.runReadiness();
+  assertReadinessForExecute(checks);
+
+  await deps.submit();
+
+  return { ...decision, action: "send" };
+}
+
 export function hasBlockingFailures(checks: ReadinessCheck[]): boolean {
   return checks.some((c) => c.status === "block");
 }
