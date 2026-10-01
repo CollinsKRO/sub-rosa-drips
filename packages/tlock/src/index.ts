@@ -18,7 +18,16 @@ export {
   auditorPublicKey,
   sealIdentity,
   openIdentity,
+  sealIdentityForBidder,
+  openIdentityForBidder,
+  decodeIdentityBlob,
+  isIdentityBound,
+  IdentityBindingError,
+  IDENTITY_BLOB_VERSION,
   type AuditorKeypair,
+  type SealIdentityForBidderParams,
+  type OpenIdentityForBidderParams,
+  type OpenedIdentity,
 } from "./auditor.js";
 
 export {
@@ -29,6 +38,10 @@ export {
   fetchRoundBeacon,
   fetchRoundSignature,
   QUICKNET_HASH,
+  QUICKNET_GENESIS,
+  QUICKNET_PERIOD,
+  QUICKNET_FIXTURE,
+  assertQuicknetFixture,
   type DrandClient,
 } from "./quicknet.js";
 
@@ -51,6 +64,7 @@ export {
 } from "./seal.js";
 
 export {
+  computePublishAtMs,
   classifyDrandRound,
   DEFAULT_STALE_THRESHOLD_MS,
   type DrandRoundInfo,
