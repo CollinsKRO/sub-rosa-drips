@@ -20,6 +20,8 @@ export interface StatusServerConfig {
   drand: DrandClient;
   storeRounds: () => import("./store.js").WatchedRound[];
   settleIndicator?: (roundId: bigint) => import("./status.js").SettlementIndicator;
+  /** Typed settlement-guard refusal for a round, if the guard held it back. */
+  guardSkip?: (roundId: bigint) => import("./settlement-guard.js").GuardSkipRecord | null;
   epochMs?: number;
 }
 
@@ -63,6 +65,7 @@ function makeRoutes(src: BuildStatusSource): Route[] {
     network: src.network,
     epochMs: src.epochMs,
     settleIndicator: src.settleIndicator,
+    guardSkip: src.guardSkip,
   });
 
   return [
@@ -173,6 +176,7 @@ export function createStatusHandler(config: StatusServerConfig): http.RequestLis
     contractId: config.contractId,
     network: config.network,
     settleIndicator: config.settleIndicator,
+    guardSkip: config.guardSkip,
     epochMs: config.epochMs ?? systemClock.nowMs(),
   };
 

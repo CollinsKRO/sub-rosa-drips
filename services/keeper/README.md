@@ -78,6 +78,8 @@ Response shape (typed in `@sub-rosa/sdk` as `KeeperStatusResponse`):
       "winningValue": null,
       "clearingRule": "HighestBid",
       "settlement": "none",
+      "guardSkip": null,
+      "guardSkipIndicator": null,
       "lastKeeperAction": null,
       "lastError": null,
       "retryCount": 0,
@@ -98,6 +100,8 @@ Response shape (typed in `@sub-rosa/sdk` as `KeeperStatusResponse`):
 - `voidableAfter`: unix seconds after which a still-Open round can be voided (reveal_deadline + 3600s grace).
 - `bidderCount`, `revealedCount`: from the on-chain bidder index / bid states; `null` when unreachable.
 - `settlement`: `pending | submitted | terminal | none` — reflects the in-memory settlement guard.
+- `guardSkip`: the typed reason the settlement guard last refused a submission for this round, or `null`. Shape: `{ action, reason, detail, at }` where `reason` is one of `already_settled | round_voided | not_cleared | missing_winner | bidder_page_incomplete | refund_missing | winner_mismatch | void_not_open | void_grace_not_elapsed`. It is set only when the keeper looked at a settle or a void and did **not** submit it because the round contract would have rejected the transaction (or the local view could not prove the refund set).
+- `guardSkipIndicator`: `"<action> refused: <reason>"` — the same refusal, flattened for logs and dashboards.
 - `lastKeeperAction`: human-readable summary of the last mutation the keeper performed for this round.
 - `lastError`, `retryCount`: tick failure tracking.
 

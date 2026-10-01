@@ -102,6 +102,7 @@ async function main() {
         if (entry.status === "submitted") return "submitted";
         return "terminal";
       },
+      guardSkip: (rid) => settlementGuard.getEntry(rid)?.skip ?? null,
     });
     // Pass empty signals so HTTP server shutdown is coordinated after watch loop completes
     statusHandle = withGracefulShutdown(server, []);

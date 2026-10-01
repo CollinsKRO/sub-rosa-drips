@@ -13,6 +13,7 @@ import {
 } from "@sub-rosa/time";
 
 import { decideKeeperDryRunAction, type KeeperDryRunPhase } from "./dry-run.js";
+import { VOID_GRACE_SECONDS, type GuardSkipRecord } from "./settlement-guard.js";
 import type { WatchedRound } from "./store.js";
 
 export type RoundStatus =
@@ -25,6 +26,12 @@ export type RoundStatus =
   | "NotFound";
 
 export type SettlementIndicator = "pending" | "submitted" | "terminal" | "none";
+
+/** One-line rendering of a guard refusal, e.g. `settle refused: refund_missing`. */
+export function guardSkipIndicator(skip: GuardSkipRecord | null): string | null {
+  if (!skip) return null;
+  return `${skip.action} refused: ${skip.reason}`;
+}
 
 export interface RoundStatusView {
   roundId: string;
@@ -46,6 +53,13 @@ export interface RoundStatusView {
   winningValue: string | null;
   clearingRule: "HighestBid" | "LowestBid" | null;
   settlement: SettlementIndicator;
+  /**
+   * The last contract rule the settlement guard refused, if any: a round held
+   * back because submitting it would have been rejected on-chain.
+   */
+  guardSkip: GuardSkipRecord | null;
+  /** {@link guardSkipIndicator} for `guardSkip` — compact, log-friendly. */
+  guardSkipIndicator: string | null;
   lastKeeperAction: string | null;
   lastError: string | null;
   retryCount: number;
@@ -78,6 +92,7 @@ export interface BuildRoundStatusArgs {
   clock?: Clock;
   settlement?: SettlementIndicator;
   watched?: WatchedRound;
+  guardSkip?: GuardSkipRecord | null;
 }
 
 export interface BuildStatusSource {
@@ -90,11 +105,11 @@ export interface BuildStatusSource {
   epochMs?: number;
   nowSeconds?: number;
   settleIndicator?: (roundId: bigint) => SettlementIndicator;
+  /** Typed reason the settlement guard last refused, for each round. */
+  guardSkip?: (roundId: bigint) => GuardSkipRecord | null;
   /** Injectable wall clock. Default: systemClock. */
   time?: PartialTimeContext;
 }
-
-const VOID_GRACE_SECONDS = 3600;
 
 async function countRevealed(
   reader: StatusReader,
@@ -118,6 +133,7 @@ export async function buildRoundStatus(
   const clock = args.clock ?? systemClock;
   const nowSeconds = args.nowSeconds ?? clock.nowSeconds();
   const ridStr = roundId.toString();
+  const guardSkip = args.guardSkip ?? null;
 
   let round;
   try {
@@ -145,6 +161,8 @@ export async function buildRoundStatus(
       winningValue: null,
       clearingRule: null,
       settlement,
+      guardSkip,
+      guardSkipIndicator: guardSkipIndicator(guardSkip),
       lastKeeperAction: watched?.lastAction ?? null,
       lastError: watched?.lastError ? publicErrorMessage(watched.lastError) : null,
       retryCount: watched?.retryCount ?? 0,
@@ -204,6 +222,8 @@ export async function buildRoundStatus(
     winningValue: round.winning_bid == null ? null : round.winning_bid.toString(),
     clearingRule: round.clearing_rule?.tag ?? null,
     settlement: settlementIndicator,
+    guardSkip,
+    guardSkipIndicator: guardSkipIndicator(guardSkip),
     lastKeeperAction: watched?.lastAction ?? null,
     lastError: watched?.lastError ? publicErrorMessage(watched.lastError) : null,
     retryCount: watched?.retryCount ?? 0,
@@ -231,6 +251,7 @@ export async function buildKeeperStatus(source: BuildStatusSource): Promise<Keep
     contractId,
     network,
     settleIndicator,
+    guardSkip,
     epochMs,
     nowSeconds,
   } = source;
@@ -251,6 +272,7 @@ export async function buildKeeperStatus(source: BuildStatusSource): Promise<Keep
         nowSeconds,
         clock,
         settlement: settleIndicator?.(BigInt(w.roundId)) ?? "none",
+        guardSkip: guardSkip?.(BigInt(w.roundId)) ?? null,
       }),
     ),
   );
