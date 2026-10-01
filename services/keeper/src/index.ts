@@ -37,6 +37,7 @@ export {
 } from "./dry-run.js";
 export {
   createStatusServer,
+  createStatusHandler,
   withGracefulShutdown,
   bigintReplacer as statusBigintReplacer,
   type StatusServerConfig,
