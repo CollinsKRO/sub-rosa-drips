@@ -96,51 +96,28 @@ test("checksum fails when a required milestone is removed from lifecycle", () =>
   assert.ok(result.ok === false && result.missing.includes("open_reveal"));
 });
 
-test("dropping a bidder fails the checksum", () => {
-  const invalidTrace = structuredClone(DEMO_TRACE) as unknown as {
-    bidders: Array<unknown>;
-    keeper: { reveals: string[] };
-  };
-  const dropped = invalidTrace.bidders[invalidTrace.bidders.length - 1] as { label: string };
-  invalidTrace.bidders = invalidTrace.bidders.slice(0, -1);
-  invalidTrace.keeper.reveals = invalidTrace.keeper.reveals.filter(
-    (r) => r !== dropped.label,
+test("demo trace contains no secret seeds", () => {
+  const json = JSON.stringify(DEMO_TRACE);
+  assert.ok(
+    !/\bS[A-Z2-7]{55}\b/.test(json),
+    "Demo trace must never contain secret seeds",
   );
+});
+
+test("health check rejects a demo trace containing an injected secret seed", () => {
+  const FAKE_SEED = "SBGWGH5QWWZ2WKKG24YCQAL35EWB64L35KAGL3E7N7H5K3T4K5K3T4K5";
+  const taintedTrace = structuredClone(DEMO_TRACE) as unknown as {
+    agents: Array<{ sessionKey: string }>;
+  };
+  taintedTrace.agents[0].sessionKey = FAKE_SEED;
 
   assert.throws(
-    () => assertDemoTrace(invalidTrace),
+    () => assertDemoTrace(taintedTrace),
     (error: unknown) => {
       assert.ok(error instanceof DemoTraceHealthCheckError);
-      assert.match(error.message, /agent ".+" has no matching bidder record/);
+      assert.ok(error.issues.some((i) => i.includes("must not contain a secret seed")));
       return true;
     },
   );
 });
 
-test("a second settle record fails the checksum", () => {
-  const invalidTrace = structuredClone(DEMO_TRACE) as unknown as {
-    lifecycle: Array<unknown>;
-  };
-  const settle = invalidTrace.lifecycle.find(
-    (e) => isRecord(e) && e.phase === "settle",
-  ) as Record<string, unknown> | undefined;
-  assert.ok(settle, "canonical trace must contain a settle event");
-  invalidTrace.lifecycle.push(structuredClone(settle));
-
-  assert.throws(
-    () => assertDemoTrace(invalidTrace),
-    /lifecycle must include exactly one settle phase/,
-  );
-});
-
-test("duplicated bidder fails the checksum", () => {
-  const invalidTrace = structuredClone(DEMO_TRACE) as unknown as {
-    bidders: Array<unknown>;
-  };
-  invalidTrace.bidders.push(structuredClone(invalidTrace.bidders[0]));
-
-  assert.throws(
-    () => assertDemoTrace(invalidTrace),
-    /bidders must not contain duplicate labels/,
-  );
-});

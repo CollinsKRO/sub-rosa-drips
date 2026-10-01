@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { StrKey } from "@stellar/stellar-sdk";
-import { SubRosaNetworkMismatchError } from "./errors.js";
+import {
+  SubRosaNetworkMismatchError,
+  SubRosaSessionMismatchError,
+} from "./errors.js";
 import {
   validateContractNetwork,
-  networkDisplayName,
-  networkPassphrasesMatch,
-  describeNetworkPassphraseMismatch,
-  SubRosaNetworkPassphraseMismatchError,
+  validatePasskeySession,
   type NetworkValidationServer,
 } from "./network.js";
 
@@ -121,3 +121,127 @@ describe("validateContractNetwork", () => {
     assert.equal(ledgerLookups, 0);
   });
 });
+
+describe("validatePasskeySession", () => {
+  const SESSION_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+  const SWAPPED_CONTRACT_ID = StrKey.encodeContract(Buffer.alloc(32, 1));
+  const FIXTURE_SEED = "SBGWGH5QWWZ2WKKG24YCQAL35EWB64L35KAGL3E7N7H5K3T4K5K3T4K5";
+
+  it("accepts a matching passkey session and target", () => {
+    assert.doesNotThrow(() => {
+      validatePasskeySession(
+        {
+          contractId: CONTRACT_ID,
+          networkPassphrase: TESTNET,
+          account: SESSION_ACCOUNT,
+        },
+        {
+          contractId: CONTRACT_ID,
+          networkPassphrase: TESTNET,
+          account: SESSION_ACCOUNT,
+        },
+      );
+    });
+  });
+
+  it("rejects a swapped contract id with a typed mismatch error", () => {
+    assert.throws(
+      () => {
+        validatePasskeySession(
+          {
+            contractId: CONTRACT_ID,
+            networkPassphrase: TESTNET,
+            account: SESSION_ACCOUNT,
+          },
+          {
+            contractId: SWAPPED_CONTRACT_ID,
+            networkPassphrase: TESTNET,
+            account: SESSION_ACCOUNT,
+          },
+        );
+      },
+      (error: unknown) => {
+        assert.ok(error instanceof SubRosaNetworkMismatchError);
+        assert.ok(error instanceof SubRosaSessionMismatchError);
+        assert.equal((error as SubRosaNetworkMismatchError).reason, "contract_mismatch");
+        assert.match((error as Error).message, /contract/);
+        return true;
+      },
+    );
+  });
+
+  it("rejects a swapped network passphrase with a typed mismatch error", () => {
+    assert.throws(
+      () => {
+        validatePasskeySession(
+          {
+            contractId: CONTRACT_ID,
+            networkPassphrase: TESTNET,
+            account: SESSION_ACCOUNT,
+          },
+          {
+            contractId: CONTRACT_ID,
+            networkPassphrase: PUBLIC,
+            account: SESSION_ACCOUNT,
+          },
+        );
+      },
+      (error: unknown) => {
+        assert.ok(error instanceof SubRosaNetworkMismatchError);
+        assert.ok(error instanceof SubRosaSessionMismatchError);
+        assert.equal((error as SubRosaNetworkMismatchError).reason, "session_mismatch");
+        assert.match((error as Error).message, /network/);
+        return true;
+      },
+    );
+  });
+
+  it("rejects a swapped account with a typed mismatch error", () => {
+    const OTHER_ACCOUNT = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF";
+    assert.throws(
+      () => {
+        validatePasskeySession(
+          {
+            contractId: CONTRACT_ID,
+            networkPassphrase: TESTNET,
+            account: SESSION_ACCOUNT,
+          },
+          {
+            contractId: CONTRACT_ID,
+            networkPassphrase: TESTNET,
+            account: OTHER_ACCOUNT,
+          },
+        );
+      },
+      (error: unknown) => {
+        assert.ok(error instanceof SubRosaNetworkMismatchError);
+        assert.ok(error instanceof SubRosaSessionMismatchError);
+        assert.equal((error as SubRosaNetworkMismatchError).reason, "account_mismatch");
+        return true;
+      },
+    );
+  });
+
+  it("ensures the error text does not contain secret seeds", () => {
+    try {
+      validatePasskeySession(
+        {
+          contractId: CONTRACT_ID,
+          networkPassphrase: TESTNET,
+          account: SESSION_ACCOUNT,
+        },
+        {
+          contractId: SWAPPED_CONTRACT_ID,
+          networkPassphrase: TESTNET,
+          account: SESSION_ACCOUNT,
+        },
+      );
+      assert.fail("should have thrown");
+    } catch (e) {
+      assert.ok(e instanceof Error);
+      assert.ok(!e.message.includes(FIXTURE_SEED));
+      assert.ok(!/\bS[A-Z2-7]{55}\b/.test(e.message));
+    }
+  });
+});
+

@@ -49,7 +49,11 @@ import {
   SubRosaTransactionError,
 } from "./errors.js";
 import { normalizeRoundId, normalizeSorobanContractId } from "./ids.js";
-import { validateContractNetwork } from "./network.js";
+import {
+  validateContractNetwork,
+  validatePasskeySession,
+  type PasskeySessionBinding,
+} from "./network.js";
 import {
   resolveTimeContext,
   systemTime,
@@ -108,7 +112,8 @@ export interface SubRosaClientConfig {
    * @internal Testing hook: inject a mock Soroban RPC server for simulation.
    */
   _server?: rpc.Server;
-
+  /** Optional passkey session to bind commits and client operations to. */
+  session?: PasskeySessionBinding;
 }
 
 export type ClearingRuleTag = ClearingRule["tag"];
@@ -140,6 +145,8 @@ export interface CommitParams {
   escrow: bigint;
   /** Bidder address. Default: the configured signer's public key. */
   bidder?: string;
+  /** Optional passkey session to bind this commit to. */
+  session?: PasskeySessionBinding;
 }
 
 export interface RevealParams {
@@ -171,6 +178,7 @@ export class SubRosaClient {
   readonly #clock: Clock;
   readonly #scheduler: Scheduler;
   readonly #server: rpc.Server;
+  readonly #session?: PasskeySessionBinding;
   #networkValidation?: Promise<void>;
 
 
@@ -217,6 +225,7 @@ export class SubRosaClient {
     const time = resolveTimeContext(systemTime, config.time);
     this.#clock = time.clock;
     this.#scheduler = time.scheduler;
+    this.#session = config.session;
     this.#server = config._server ?? new rpc.Server(config.rpcUrl, { allowHttp });
 
     if (config._sleep) this.#sleep = config._sleep;
@@ -236,6 +245,16 @@ export class SubRosaClient {
    *  for argument/return encoding. Exposed for offline encoding checks. */
   get spec() {
     return this.contract.spec;
+  }
+
+  /** The configured source account (public key G...) if available. */
+  get account(): string | undefined {
+    return this.#source;
+  }
+
+  /** The configured passkey session binding, if any. */
+  get session(): PasskeySessionBinding | undefined {
+    return this.#session;
   }
 
   #requireSource(role: string): string {
@@ -425,6 +444,15 @@ export class SubRosaClient {
   }
 
   async commit(params: CommitParams): Promise<void> {
+    const session = params.session ?? this.#session;
+    if (session) {
+      validatePasskeySession(session, {
+        contractId: this.contractId,
+        networkPassphrase: this.networkPassphrase,
+        account: params.bidder ?? this.#source,
+      });
+    }
+
     // Validate encrypted blobs before submitting — catches size/encoding
     // issues early, before paying gas for an on-chain revert (PayloadTooLarge).
     const ciphertextResult = validateEncryptedBlob(
@@ -566,7 +594,15 @@ export class SubRosaClient {
   }
 
   /** Simulate `commit` without signing or submitting. */
-  preflightCommit(params: CommitParams): Promise<PreflightResult<void>> {
+  async preflightCommit(params: CommitParams): Promise<PreflightResult<void>> {
+    const session = params.session ?? this.#session;
+    if (session) {
+      validatePasskeySession(session, {
+        contractId: this.contractId,
+        networkPassphrase: this.networkPassphrase,
+        account: params.bidder ?? this.#source,
+      });
+    }
     return this.#preflight("commit", () => {
       const bidder = params.bidder ?? this.#requireSource("bidder");
       return this.#validatedContractCall(() =>
