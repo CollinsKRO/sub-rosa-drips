@@ -222,6 +222,59 @@ export class SubRosaEscrowConservationError extends SubRosaPreflightError {
   }
 }
 
+export interface ManifestErrorParams {
+  message: string;
+  /** Manifest field that failed validation, when the failure is field-scoped. */
+  field?: string;
+  /** Path of the committed manifest file, when it was read from disk. */
+  path?: string;
+  cause?: unknown;
+}
+
+/** Raised when the committed artifact manifest is missing, unreadable, or invalid. */
+export class SubRosaManifestError extends Error {
+  readonly name = "SubRosaManifestError";
+  readonly field?: string;
+  readonly path?: string;
+
+  constructor(message: string, params: Omit<ManifestErrorParams, "message"> = {}) {
+    super(message, params.cause === undefined ? undefined : { cause: params.cause });
+    this.field = params.field;
+    this.path = params.path;
+  }
+}
+
+export interface DeploymentMismatchErrorParams {
+  /** Manifest field names that disagreed, in manifest order. */
+  fields: string[];
+  /** One redacted, human-readable line per field. */
+  details: string[];
+  /** Source of the expectations, e.g. the manifest path. */
+  manifestSource?: string;
+}
+
+/**
+ * Raised when the live deployment disagrees with the committed manifest. The
+ * message names the offending fields and carries only redacted values, so it is
+ * safe to log.
+ */
+export class SubRosaDeploymentMismatchError extends Error {
+  readonly name = "SubRosaDeploymentMismatchError";
+  readonly fields: string[];
+  readonly details: string[];
+  readonly manifestSource?: string;
+
+  constructor(params: DeploymentMismatchErrorParams) {
+    super(
+      `deployment does not match the committed mainnet manifest: ${params.fields.join(", ")}` +
+        (params.manifestSource ? ` (${params.manifestSource})` : ""),
+    );
+    this.fields = params.fields;
+    this.details = params.details;
+    this.manifestSource = params.manifestSource;
+  }
+}
+
 export class SubRosaTimeoutError extends Error {
   readonly name = "SubRosaTimeoutError";
   readonly hash: string;

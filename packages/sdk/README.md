@@ -40,43 +40,55 @@ simulation, signing, or submission, with the conflicting values and a suggested
 fix. Contract IDs do not encode a Stellar network, so copying a `C...` address
 between Testnet and Mainnet requires updating all three configuration values.
 
-## Escrow conservation preflight
+## Mainnet readiness (manifest-pinned)
 
-The contract keeps one identity per round — the escrow it holds equals the
-payout plus refunds plus whatever is still locked — and refuses to `settle` or
-`void` a round that cannot prove it, failing with `EscrowNotConserved`. The SDK
-re-derives the same accounting off-chain so a keeper can halt before paying a
-fee.
+`packages/sdk/mainnet-artifacts.json` is the artifact manifest the repo commits.
+`mainnet:ready` and `mainnet:verify` both load it and compare the live deployment
+against it through the read-only client:
 
-`proveEscrowConservation` walks the bidder index in pages, reads every bid
-state, and cross-checks the walk against the bidder list on the round record. It
-never throws; a drifted, duplicated, or unreadable index comes back as an issue
-on the report:
+| manifest field   | compared against                                             |
+| ---------------- | ------------------------------------------------------------ |
+| `contractId`     | the contract the client is bound to                          |
+| `networkPassphrase` | the passphrase the RPC reports (`getNetwork`)             |
+| `wasmHash`       | the executable hash read from the contract ledger entry      |
+| `tokenContract`  | `usdc` in the deployed `GlobalConfig` (the escrow SAC)        |
 
-```ts
-const report = await client.proveEscrowConservation(roundId, "settle");
-if (!report.conserved) {
-  for (const issue of report.issues) console.warn(issue.code, issue.message);
-}
-```
-
-`preflightSettleConservation` and `preflightVoidConservation` are the stricter
-wrappers: they throw `SubRosaEscrowConservationError` (a `SubRosaPreflightError`
-with `kind: "escrow_not_conserved"`) carrying the `roundId`, the `phase`, and
-the full report, so a keeper can branch on `error.kind` instead of parsing text.
+Any disagreement blocks, and a field that cannot be read at all blocks too — an
+unverifiable field must never read as a pass. The report names the field and
+prints a redacted value: passphrases become a short sha256 fingerprint, and
+anything shaped like an `S...` secret key is redacted outright. The configured
+passphrase and contract id are compared with the manifest before any RPC call,
+so pointing `NETWORK_PASSPHRASE` at testnet fails instead of reporting a green
+check against the wrong network.
 
 ```ts
-try {
-  await client.preflightSettleConservation(roundId);
-  await client.settle(roundId);
-} catch (error) {
-  if (error instanceof SubRosaEscrowConservationError) {
-    console.error(error.roundId, error.phase, error.report.issues);
-  }
-}
+import {
+  assertDeploymentMatches,
+  defaultMainnetReadinessInput,
+  readLiveDeployment,
+  runMainnetReadiness,
+} from "@sub-rosa/sdk";
+
+// Live: throws SubRosaDeploymentMismatchError naming every disagreeing field.
+assertDeploymentMatches(manifest, await readLiveDeployment(client, server, contractId, fetchHash));
+
+// Full report, or a replay of a recorded snapshot with no RPC at all:
+const report = await runMainnetReadiness(
+  defaultMainnetReadinessInput({ fixture: recordedSnapshot }),
+);
 ```
 
-Issue codes cover page drift (`page_total_drift`, `page_count_mismatch`,
-`cursor_stalled`), index integrity (`duplicate_bidder`, `index_mismatch`,
-`bid_state_missing`, `bidder_already_settled`, `winner_not_indexed`), and the
-accounting itself (`escrow_stranded`, `round_wrong_status`, `no_winner`).
+Readiness never needs a secret key: the client is read-only and balance checks
+take public keys (`OPERATOR_PUBLIC_KEY`, `KEEPER_PUBLIC_KEY`, `BIDDER_PUBLIC_KEY`).
+
+## Commands
+
+```bash
+pnpm mainnet:ready -- --strict                                      # live, read-only
+pnpm mainnet:ready -- --fixture packages/sdk/fixtures/mainnet-readiness.json  # CI-safe
+pnpm mainnet:verify                                                 # settlement proof + manifest
+```
+
+`--fixture` replays a recorded deployment through the same comparison with no
+mainnet RPC, so CI can prove each mismatch field fails and a matching recording
+passes.
