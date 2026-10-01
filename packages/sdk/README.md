@@ -2,6 +2,22 @@
 
 TypeScript client for reading and submitting Sub Rosa Round contract calls.
 
+## Bidder enumeration
+
+`client.bidders(roundId)` follows the contract's opaque cursors until `has_more`
+is false. Each bidder is yielded once in first-commit order. A repeated bidder
+or a page that cannot make consistent progress throws `SubRosaPaginationError`;
+consumers must let that error abort the operation rather than use a partial set.
+Receipt export uses this iterator too.
+
+For manual paging, call `getBiddersPage(roundId, undefined, limit)` to start,
+then pass `page.next_cursor` unchanged while `page.has_more` is true. The first
+page fixes a snapshot count, excluding bidders who commit later; restart to
+include those bidders. Tokens from another round or contract are rejected.
+The [cursor format](../../contracts/round/ERRORS.md#bidder-cursor-encoding-v1)
+is versioned and replaces the old numeric-offset ABI, so this SDK requires a
+contract deployed with the matching generated bindings.
+
 ## Network configuration
 
 Configure the RPC URL, network passphrase, and contract ID from the same deployment:

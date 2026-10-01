@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Vec};
+use soroban_sdk::{xdr::ToXdr, Address, Bytes, Env, Vec};
 
 use crate::types::{BidState, DataKey, Error, EscrowLedger, GlobalConfig, Round, Seal};
 

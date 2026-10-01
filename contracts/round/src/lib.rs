@@ -75,6 +75,7 @@ impl SubRosaRound {
         commit_deadline: u64,
         reveal_deadline: u64,
         auditor_pubkey: Bytes,
+        asset_config: RoundAssetConfig,
     ) -> Result<u64, Error> {
         operator.require_auth();
         let config = get_config(&env)?;
@@ -115,6 +116,7 @@ impl SubRosaRound {
             bidders: Vec::new(&env),
             winner: None,
             winning_bid: 0,
+            asset_config,
         };
         set_round(&env, round_id, &round);
 
@@ -542,34 +544,19 @@ impl SubRosaRound {
         Ok(storage::get_round(&env, round_id)?.bidders)
     }
 
-    /// Paginated bidder index for a round. Returns a page of bidders starting
-    /// at `cursor` (zero-based), with continuation metadata.
-    ///
-    /// `limit` must be 1–100. `next_cursor` in the response is 0 when there
-    /// are no more pages.
+    /// Paginated bidder index. Pass None to start, then the opaque next_cursor.
+    /// The snapshot count is fixed on the first page; appended bidders require
+    /// a new enumeration. Limit must be 1–100. has_more is false at exhaustion.
     pub fn get_bidders_page(
         env: Env,
         round_id: u64,
-        cursor: u32,
+        cursor: Option<Bytes>,
         limit: u32,
     ) -> Result<BiddersPage, Error> {
         if limit == 0 || limit > MAX_PAGE_SIZE {
             return Err(Error::InvalidLimit);
         }
-        let bidders = storage::get_round(&env, round_id)?.bidders;
-        let total = bidders.len();
-        let start = cursor.min(total);
-        let end = (start + limit).min(total);
-        let mut data: Vec<Address> = Vec::new(&env);
-        for i in start..end {
-            data.push_back(bidders.get(i).unwrap());
-        }
-        let next_cursor = if end < total { end } else { 0 };
-        Ok(BiddersPage {
-            data,
-            next_cursor,
-            total,
-        })
+        storage::bidders_page(&env, round_id, cursor, limit)
     }
 
     /// Observer view: the sealed ciphertext + auditor blob while still in
