@@ -31,7 +31,8 @@ import { quicknet } from "@sub-rosa/tlock";
 
 import { createSettlementGuard } from "./settlement-guard.js";
 import { createStatusServer, withGracefulShutdown } from "./status-server.js";
-import { generateLeaseOwner, KeeperStore, parseLeaseMs } from "./store.js";
+import { KeeperStore } from "./store.js";
+import { KeeperQueue } from "./queue.js";
 import { runWatchLoop } from "./watch-loop.js";
 
 function reqEnv(name: string): string {
@@ -65,6 +66,7 @@ async function main() {
 
   const store = new KeeperStore();
   const settlementGuard = createSettlementGuard();
+  const queue = new KeeperQueue(store, { contractId, network: networkPassphrase });
 
   let stopping = false;
   process.on("SIGINT", () => {
@@ -98,7 +100,8 @@ async function main() {
       },
       guardSkip: (rid) => settlementGuard.getEntry(rid)?.skip ?? null,
     });
-    statusHandle = withGracefulShutdown(server);
+    // Pass empty signals so HTTP server shutdown is coordinated after watch loop completes
+    statusHandle = withGracefulShutdown(server, []);
     diagnostics.info("status-api-http", `· status API: http://${statusHost}:${statusPort} (GET /status, /status/rounds/:id, /healthz, /status/health)`);
   } else {
     diagnostics.info("status-api-disabled-keeper-status-enable-false", "· status API disabled (KEEPER_STATUS_ENABLE=false)");
@@ -117,6 +120,7 @@ async function main() {
     contractId,
     network: networkPassphrase,
     store,
+    queue,
     settlementGuard,
     isStopping: () => stopping,
     owner: process.env.KEEPER_OWNER?.trim() || generateLeaseOwner(),

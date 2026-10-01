@@ -36,7 +36,7 @@ import {
   type TimeContext,
 } from "@sub-rosa/time";
 
-export { VOID_GRACE_SECONDS } from "./settlement-guard.js";
+import type { SettlementGuard } from "./settlement-guard.js";
 
 export type KeeperLogger = (msg: string) => void;
 
@@ -51,12 +51,6 @@ export interface KeeperDeps {
   pollMs?: number;
   /** Injectable wall clock and scheduler. Default: systemTime. */
   time?: PartialTimeContext;
-  /**
-   * Duplicate + contract-rule guard. When present, a settle or a void is
-   * refused (with a typed reason) if the local view of the round is one the
-   * contract would reject — incomplete bidder page, unreadable refund,
-   * winner mismatch, wrong status, or a void inside the grace window.
-   */
   settlementGuard?: SettlementGuard;
 }
 
@@ -316,38 +310,28 @@ export async function closeRound(
 
   // ── Phase D: settle a cleared round (real SAC transfers) ──────────────
   if (round.status.tag === "Cleared") {
-    const guard = deps.settlementGuard;
-    let refused = false;
-    if (guard) {
-      // The contract decides the winner and the refund set; we check our local
-      // view of both before paying for a transaction it would reject.
-      const view = await readSettlementView(sdk, rid, clock.nowSeconds());
-      const check = guard.checkSettle(view);
-      if (check.allowed) {
-        guard.markSubmitted(rid);
-      } else {
-        refused = true;
-        result.guardSkip = contractRefusal(check.event);
-        const reason = describeSettlementSkip(check.event);
-        result.skipped.push(`settle refused: ${reason}`);
-        log(`settle refused for round ${rid}: ${reason}`);
+    if (deps.settlementGuard) {
+      const check = deps.settlementGuard.canSettle(rid);
+      if (!check.allowed) {
+        result.skipped.push(`settle skipped: duplicate (${check.event.skippedDuplicateReason})`);
+        round = await sdk.getRound(rid);
+        result.finalStatus = round.status.tag;
+        return result;
       }
+      deps.settlementGuard.markSubmitted(rid);
     }
-
-    if (!refused) {
-      try {
-        await sdk.settle(rid);
-        result.settled = true;
-        guard?.markTerminal(rid, "settled on-chain");
-        log(`settled round ${rid}`);
-      } catch (e) {
-        if (errorMatches(e, ["AlreadySettled", "NotCleared", "WrongStatus"])) {
-          result.skipped.push(`settle skipped: ${errorName(e)}`);
-          guard?.markTerminal(rid, errorName(e));
-        } else {
-          guard?.markRetryable(rid, errorName(e));
-          throw e;
-        }
+    try {
+      await sdk.settle(rid);
+      result.settled = true;
+      deps.settlementGuard?.markTerminal(rid, "settled on-chain");
+      log(`settled round ${rid}`);
+    } catch (e) {
+      if (errorMatches(e, ["AlreadySettled", "NotCleared", "WrongStatus"])) {
+        deps.settlementGuard?.markTerminal(rid, `skipped: ${errorName(e)}`);
+        result.skipped.push(`settle skipped: ${errorName(e)}`);
+      } else {
+        deps.settlementGuard?.markRetryable(rid, errorName(e));
+        throw e;
       }
     }
     round = await sdk.getRound(rid);

@@ -160,7 +160,7 @@ import { KeeperStatusClient } from "@sub-rosa/sdk";
 const client = new KeeperStatusClient({ baseURL: "http://127.0.0.1:8090" });
 const status = await client.getStatus();
 for (const round of status.rounds) {
-  console.log(round.roundId, round.status, round.phase);
+  logger.info("round-status", "round status", { roundId: round.roundId.toString(), status: round.status, phase: round.phase });
 }
 ```
 

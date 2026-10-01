@@ -12,7 +12,7 @@ import { normalizeError } from "@sub-rosa/logging/errors";
 
 import type { SubRosaClient } from "@sub-rosa/sdk";
 import type { DrandClient } from "@sub-rosa/tlock";
-import { resolveTimeContext, systemTime, type PartialTimeContext } from "@sub-rosa/time";
+import { resolveTimeContext, systemTime, type PartialTimeContext, type Scheduler } from "@sub-rosa/time";
 
 import {
   discoverRoundIds,
@@ -23,7 +23,8 @@ import {
 } from "./keeper.js";
 import type { SettlementGuard } from "./settlement-guard.js";
 import type { KeeperLogger } from "./keeper.js";
-import { DEFAULT_LEASE_MS, generateLeaseOwner, KeeperStore } from "./store.js";
+import { KeeperStore } from "./store.js";
+import { KeeperQueue } from "./queue.js";
 
 export interface RunWatchLoopParams {
   sdk: SubRosaClient;
@@ -37,47 +38,8 @@ export interface RunWatchLoopParams {
   isStopping: () => boolean;
   /** Injectable wall clock and scheduler. Default: systemTime. */
   time?: PartialTimeContext;
-  /** Lease owner recorded for rounds this loop claims. Default: generated. */
-  owner?: string;
-  /** Lease duration in ms. Default: {@link DEFAULT_LEASE_MS}. */
-  leaseMs?: number;
-}
-
-/**
- * Transport failures leave the round exactly as it was, so the lease stays
- * with its owner until it expires. A contract that answered and rejected the
- * step is definitive: the attempt cannot succeed, so the round goes back to
- * the queue for whoever picks it up next.
- */
-const TRANSIENT_ERROR_MARKERS = [
-  "timeout",
-  "timed out",
-  "ETIMEDOUT",
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "EPIPE",
-  "fetch failed",
-  "socket hang up",
-  "aborted",
-];
-
-const CONTRACT_ERROR_MARKERS = [
-  "HostError",
-  "Error(Contract",
-  "Error(WasmVm",
-  "ended with status",
-];
-
-export function isDefinitiveContractFailure(error: unknown): boolean {
-  const normalized = normalizeError(error);
-  if (normalized.retryable) return false;
-  const message = normalized.message;
-  if (TRANSIENT_ERROR_MARKERS.some((marker) => message.toLowerCase().includes(marker.toLowerCase()))) {
-    return false;
-  }
-  return CONTRACT_ERROR_MARKERS.some((marker) => message.includes(marker));
+  queue?: KeeperQueue;
+  shutdownTimeoutMs?: number;
 }
 
 const bigintReplacer = (_k: string, v: unknown): unknown =>
@@ -104,6 +66,58 @@ async function resolveRoundIds(reader: SubRosaClient): Promise<bigint[]> {
   });
 }
 
+/**
+ * Bounds in-flight round execution during shutdown by the given scheduler and timeout.
+ */
+async function waitForInFlight<T>(
+  promise: Promise<T>,
+  opts: {
+    isStopping: () => boolean;
+    scheduler: Scheduler;
+    timeoutMs: number;
+    roundId: bigint;
+  },
+): Promise<T> {
+  const { isStopping, scheduler, timeoutMs, roundId } = opts;
+  let done = false;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    const triggerTimeout = () => {
+      scheduler.setTimeout(() => {
+        if (!done) {
+          reject(new Error(`Shutdown timeout (${timeoutMs}ms) waiting for round ${roundId}`));
+        }
+      }, timeoutMs);
+    };
+
+    if (isStopping()) {
+      triggerTimeout();
+      return;
+    }
+
+    const checkInterval = 25;
+    let pollHandle: ReturnType<typeof scheduler.setTimeout> | undefined;
+
+    const check = () => {
+      if (done) return;
+      if (isStopping()) {
+        triggerTimeout();
+        return;
+      }
+      pollHandle = scheduler.setTimeout(check, checkInterval);
+    };
+
+    pollHandle = scheduler.setTimeout(check, checkInterval);
+  });
+
+  return Promise.race([
+    promise.finally(() => {
+      done = true;
+    }),
+    timeoutPromise,
+  ]);
+}
+
 export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
   const {
     sdk,
@@ -120,54 +134,58 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
     leaseMs,
   } = params;
 
+  // Load the checkpoint / stored rounds and validate before claiming work
+  const storedRounds = store.listRounds();
+  validateStoredCheckpoint(storedRounds, { contractId, network });
+
   const resolvedTime = resolveTimeContext(systemTime, time);
   const { clock, scheduler } = resolvedTime;
   const deps: KeeperDeps = { sdk, drand, log, time: resolvedTime, settlementGuard };
-  const owner = explicitOwner?.trim() || generateLeaseOwner();
+  const queue = params.queue ?? new KeeperQueue(store, { contractId, network });
+  const shutdownTimeoutMs = params.shutdownTimeoutMs ?? 30000;
 
-  while (!isStopping()) {
+  const shouldStop = () => isStopping() || queue.isStopping();
+
+  while (!shouldStop()) {
     const started = clock.nowMs();
     let discoveredIds: bigint[] = [];
     try {
       discoveredIds = await resolveRoundIds(sdk);
       for (const id of discoveredIds) {
-        store.addRound(id, { contractId, network });
+        queue.enqueue(id, { contractId, network });
       }
     } catch (e) {
       log(`watch: failed to list/discover rounds: ${normalizeError(e).message}`);
     }
 
-    const activeRounds = store.listRounds().filter((r) => {
-      if (r.contractId && r.contractId !== contractId) return false;
-      if (r.network && r.network !== network) return false;
-      if (r.lastStatus === "Settled" || r.lastStatus === "Voided") return false;
-      return true;
-    });
+    queue.syncWithStore();
 
-    if (activeRounds.length === 0) {
+    if (queue.size() === 0 && queue.inFlightCount() === 0) {
       log("no active rounds found in queue — waiting");
     }
 
-    for (const storedRound of activeRounds) {
+    const batchSize = queue.size();
+    for (let i = 0; i < batchSize; i++) {
+      if (shouldStop()) break;
+
+      const storedRound = queue.claim();
+      if (!storedRound) break;
+
       const roundId = BigInt(storedRound.roundId);
-      if (isStopping()) break;
-      // One watcher per round: whoever holds the lease reveals and settles,
-      // everybody else skips the tick instead of submitting alongside it.
-      const claim = store.claimRound(roundId, {
-        owner,
-        contractId,
-        network,
-        ...(leaseMs !== undefined ? { leaseMs } : {}),
-      });
-      if (!claim.claimed) {
-        log(
-          `[round ${roundId}] lease held by ${claim.lease.owner} until ` +
-            `${clock.toISOString(claim.lease.expiresAtMs)} — skipping tick`,
-        );
-        continue;
-      }
       try {
-        const tick = await watchRound(deps, roundId);
+        const canSettleCheck = settlementGuard.canSettle(roundId);
+        if (!canSettleCheck.allowed) {
+          // Settlement already in-flight or terminal; close phase handled by guard
+        }
+
+        const tickPromise = watchRound(deps, roundId);
+        const tick = await waitForInFlight(tickPromise, {
+          isStopping: shouldStop,
+          scheduler,
+          timeoutMs: shutdownTimeoutMs,
+          roundId,
+        });
+
         const active =
           tick.finalStatus !== "Settled" && tick.finalStatus !== "Voided";
         const acted =
@@ -183,17 +201,7 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
           settlementGuard.markTerminal(roundId, "voided on-chain");
         }
 
-        // The guard refused a submission the contract would have rejected.
-        // Logged even though nothing was submitted (so `acted` stays false).
-        const refusal = tick.close?.guardSkip ?? tick.void?.guardSkip;
-        if (refusal) {
-          log(
-            `[round ${roundId}] settlement_skipped_contract ${refusal.action}: ` +
-              `${refusal.reason} — ${refusal.detail}`,
-          );
-        }
-
-        store.updateRound(roundId, {
+        queue.complete(roundId, {
           lastStatus: tick.finalStatus,
           retryCount: 0,
           lastError: undefined,
@@ -219,7 +227,7 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
           normalizeError(e).message,
         );
         const stored = store.getRound(roundId);
-        store.updateRound(roundId, {
+        queue.release(roundId, {
           retryCount: (stored?.retryCount ?? 0) + 1,
           lastError: normalizeError(e).message,
         });
@@ -235,9 +243,17 @@ export async function runWatchLoop(params: RunWatchLoopParams): Promise<void> {
       }
     }
 
-    if (isStopping()) break;
+    if (shouldStop()) break;
     const elapsed = clock.nowMs() - started;
     const wait = Math.max(0, pollMs - elapsed);
-    if (wait > 0) await scheduler.sleep(wait);
+    if (wait > 0) {
+      const step = Math.min(wait, 250);
+      let waited = 0;
+      while (waited < wait && !shouldStop()) {
+        const toSleep = Math.min(step, wait - waited);
+        await scheduler.sleep(toSleep);
+        waited += toSleep;
+      }
+    }
   }
 }
