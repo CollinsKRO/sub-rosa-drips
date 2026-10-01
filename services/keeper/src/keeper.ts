@@ -31,6 +31,8 @@ import {
   type TimeContext,
 } from "@sub-rosa/time";
 
+import type { SettlementGuard } from "./settlement-guard.js";
+
 export type KeeperLogger = (msg: string) => void;
 
 export interface KeeperDeps {

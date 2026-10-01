@@ -1,11 +1,13 @@
 // Copyright (c) 2026 Sub Rosa contributors
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { readFileSync } from "node:fs";
 import { rpc, StrKey } from "@stellar/stellar-sdk";
 
 import { SubRosaClient } from "./client.js";
 import {
   SubRosaClientConfigError,
+  SubRosaPaginationError,
   SubRosaSubmitError,
 } from "./errors.js";
 import type {
@@ -31,6 +33,84 @@ const BASE_CONFIG = {
 
 const PUBLIC_KEY =
   "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+describe("bidder cursor enumeration", () => {
+  const fixture = readFileSync(new URL("../../../fixtures/bidder-pagination.txt", import.meta.url), "utf8").trim().split("\n");
+  const cursor1 = Buffer.alloc(41, 1);
+  const cursor2 = Buffer.alloc(41, 2);
+  const pages = () => [
+    { data: fixture.slice(0, 3), next_cursor: cursor1, has_more: true, total: 7 },
+    { data: fixture.slice(3, 6), next_cursor: cursor2, has_more: true, total: 7 },
+    { data: fixture.slice(6), next_cursor: undefined, has_more: false, total: 7 },
+  ];
+  function mockClient(responses: ReturnType<typeof pages>) {
+    const client = new SubRosaClient(BASE_CONFIG);
+    const calls: Array<{ round_id: bigint; cursor: Buffer | undefined; limit: number }> = [];
+    client.contract.get_bidders_page = (async (args: typeof calls[number]) => {
+      calls.push(args);
+      const page = responses[calls.length - 1];
+      assert.ok(page, "iterator must stop at exhaustion or invalid response");
+      return { result: { unwrap: () => page } };
+    }) as typeof client.contract.get_bidders_page;
+    return { client, calls };
+  }
+  async function collect(client: SubRosaClient) {
+    const out: string[] = [];
+    for await (const bidder of client.bidders(1n)) out.push(bidder);
+    return out;
+  }
+  it("reads the shared fixture in three pages exactly once, forwarding opaque tokens", async () => {
+    const { client, calls } = mockClient(pages());
+    assert.deepEqual(await collect(client), fixture);
+    assert.deepEqual(calls.map((c) => c.cursor), [undefined, cursor1, cursor2]);
+    assert.ok(calls.every((c) => c.round_id === 1n && c.limit === 100));
+  });
+  it("stops on a duplicate across pages with a typed error", async () => {
+    const responses = pages();
+    responses[1].data[1] = fixture[0];
+    const { client, calls } = mockClient(responses);
+    await assert.rejects(collect(client), (error: unknown) => {
+      assert.ok(error instanceof SubRosaPaginationError);
+      assert.equal(error.reason, "repeated_bidder");
+      assert.equal(error.bidder, fixture[0]);
+      assert.equal(error.roundId, 1n);
+      return true;
+    });
+    assert.equal(calls.length, 2);
+  });
+  it("validates a page before yielding a duplicate within it", async () => {
+    const responses = pages();
+    responses[0].data = [fixture[0], fixture[0]];
+    const { client } = mockClient(responses);
+    await assert.rejects(client.bidders(1n).next(), SubRosaPaginationError);
+  });
+  it("rejects a repeated cursor before fetching another page", async () => {
+    const responses = pages();
+    responses[1].next_cursor = cursor1;
+    const { client, calls } = mockClient(responses);
+    await assert.rejects(collect(client), (e: unknown) => e instanceof SubRosaPaginationError && e.reason === "repeated_cursor");
+    assert.equal(calls.length, 2);
+  });
+  for (const [label, mutate] of [
+    ["empty continuing page", (p: ReturnType<typeof pages>) => { p[0].data = []; }],
+    ["missing continuation", (p: ReturnType<typeof pages>) => { p[0].next_cursor = undefined; }],
+    ["truncated terminal page", (p: ReturnType<typeof pages>) => { p[2].data = []; }],
+    ["changing total", (p: ReturnType<typeof pages>) => { p[1].total = 8; }],
+    ["malformed cursor", (p: ReturnType<typeof pages>) => { p[0].next_cursor = Buffer.alloc(1); }],
+    ["terminal continuation", (p: ReturnType<typeof pages>) => { p[2].next_cursor = cursor1; }],
+  ] as const) {
+    it(`rejects ${label}`, async () => {
+      const responses = pages();
+      mutate(responses);
+      await assert.rejects(collect(mockClient(responses).client), SubRosaPaginationError);
+    });
+  }
+  it("finishes an empty round in one call", async () => {
+    const { client, calls } = mockClient([{ data: [], next_cursor: undefined, has_more: false, total: 0 }]);
+    assert.deepEqual(await collect(client), []);
+    assert.equal(calls.length, 1);
+  });
+});
 
 function assertConfigError(
   createClient: () => SubRosaClient,

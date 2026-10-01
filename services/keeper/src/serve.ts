@@ -22,6 +22,8 @@ const diagnostics = createLogger("services.keeper.src.serve");
 //   KEEPER_STATUS_HOST  status API bind host (default 127.0.0.1)
 //   KEEPER_STATUS_PORT  status API port (default 8090)
 //   KEEPER_STATUS_ENABLE set to "false" to disable the status API (default true)
+//   KEEPER_OWNER        optional lease owner id (default: generated per run)
+//   KEEPER_LEASE_MS     round lease duration (default 120000)
 
 import { Keypair } from "@stellar/stellar-sdk";
 import { SubRosaClient } from "@sub-rosa/sdk";
@@ -31,6 +33,7 @@ import { KeeperCheckpointStore } from "./checkpoint.js";
 import { createSettlementGuard } from "./settlement-guard.js";
 import { createStatusServer, withGracefulShutdown } from "./status-server.js";
 import { KeeperStore } from "./store.js";
+import { KeeperQueue } from "./queue.js";
 import { runWatchLoop } from "./watch-loop.js";
 
 function reqEnv(name: string): string {
@@ -67,6 +70,7 @@ async function main() {
   // for another network or contract id.
   const checkpoint = new KeeperCheckpointStore({ network: networkPassphrase, contractId });
   const settlementGuard = createSettlementGuard();
+  const queue = new KeeperQueue(store, { contractId, network: networkPassphrase });
 
   let stopping = false;
   process.on("SIGINT", () => {
@@ -99,7 +103,8 @@ async function main() {
         return "terminal";
       },
     });
-    statusHandle = withGracefulShutdown(server);
+    // Pass empty signals so HTTP server shutdown is coordinated after watch loop completes
+    statusHandle = withGracefulShutdown(server, []);
     diagnostics.info("status-api-http", `· status API: http://${statusHost}:${statusPort} (GET /status, /status/rounds/:id, /healthz, /status/health)`);
   } else {
     diagnostics.info("status-api-disabled-keeper-status-enable-false", "· status API disabled (KEEPER_STATUS_ENABLE=false)");
@@ -118,9 +123,12 @@ async function main() {
     contractId,
     network: networkPassphrase,
     store,
+    queue,
     settlementGuard,
     checkpoint,
     isStopping: () => stopping,
+    owner: process.env.KEEPER_OWNER?.trim() || generateLeaseOwner(),
+    leaseMs: parseLeaseMs(process.env.KEEPER_LEASE_MS),
   });
 
   if (statusHandle) await statusHandle.close();

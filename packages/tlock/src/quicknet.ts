@@ -8,7 +8,7 @@ import {
   roundAt as drandRoundAt,
 } from "drand-client";
 
-import { drandSignatureToSoroban } from "./bls.js";
+import { drandSignatureToSoroban, verifyDrandSignature } from "./bls.js";
 import { assertBeacon, assertChainInfo } from "./validate.js";
 import { systemClock, type Clock } from "@sub-rosa/time";
 
@@ -48,10 +48,25 @@ export async function roundInSeconds(
 }
 
 /// The raw beacon (round, randomness, signature hex) for a specific round.
-/// Rejects if round R has not yet been published or the response is malformed.
+/// Rejects if round R has not yet been published, is for the wrong round,
+/// or fails local BLS cryptographic verification.
 export async function fetchRoundBeacon(client: DrandClient, round: number) {
   const beacon = await fetchBeacon(client, round);
   assertBeacon(beacon);
+
+  // 1. Structural binding: Ensure the network didn't return a different round
+  if (beacon.round !== round) {
+    throw new Error(`Drand round mismatch: requested ${round}, received ${beacon.round}`);
+  }
+
+  // 2. Cryptographic binding: Verify the signature locally before trusting it
+  const info = await chainInfo(client);
+  const isValid = verifyDrandSignature(beacon.signature, round, info.public_key);
+  
+  if (!isValid) {
+    throw new Error(`Invalid Drand signature for round ${round}`);
+  }
+
   return beacon;
 }
 
