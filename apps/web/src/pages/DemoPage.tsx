@@ -88,6 +88,7 @@ function PhaseGuide(props: {
   revealedCount: number;
   commitSecondsRemaining: number | null;
   commitClosed: boolean;
+  networkMismatch: { chainNetwork: string; sdkNetwork: string } | null;
   drandGate: ReturnType<typeof useDrandCountdown>;
   status: ActionStatus;
   entryValue: number;
@@ -108,6 +109,7 @@ function PhaseGuide(props: {
     revealedCount,
     commitSecondsRemaining,
     commitClosed,
+    networkMismatch,
     drandGate,
     status,
     entryValue,
@@ -222,6 +224,19 @@ function PhaseGuide(props: {
     timerValue = "live";
     ctaLabel = "Open + reveal";
     cta = openAndReveal;
+  }
+
+  if (networkMismatch) {
+    tone = "danger";
+    eyebrow = "Network mismatch";
+    title = "Wrong wallet network";
+    detail = `Connected wallet is on ${networkMismatch.chainNetwork}, but this demo submits to ${networkMismatch.sdkNetwork}. Switch Freighter to ${networkMismatch.sdkNetwork} and reconnect before committing, revealing, or settling.`;
+    timerLabel = "Wallet";
+    timerValue = networkMismatch.chainNetwork;
+    ctaLabel = "Network mismatch";
+    ctaDisabled = true;
+    showInput = false;
+    showJoin = false;
   }
 
   if (working) {
@@ -496,6 +511,7 @@ function LivePanel({
     drandGate,
     commitSecondsRemaining,
     commitClosed,
+    networkMismatch,
     revealedCount,
     committed,
     commitValue,
@@ -587,6 +603,7 @@ function LivePanel({
         revealedCount={revealedCount}
         commitSecondsRemaining={commitSecondsRemaining}
         commitClosed={commitClosed}
+        networkMismatch={networkMismatch}
         drandGate={drandGate}
         status={status}
         entryValue={entryValue}

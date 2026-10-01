@@ -34,6 +34,7 @@ mock.module(new URL("../lib/chain.ts", import.meta.url).href, { namedExports: {
   LIVE_COMMIT_WINDOW_SECONDS: 27, LIVE_REVEAL_IN_SECONDS: 37, LIVE_REVEAL_WINDOW_AFTER_REVEAL_SECONDS: 240,
   useWalletContract: () => contract, displayError: (e: Error) => e.message,
   formatDemoAmount: String, freighterError: () => null, resolveFreighterAddress: async () => "wallet",
+  detectChainNetworkPassphrase: async () => "test", sdkClientNetworkPassphrase: () => "test",
   sha256Bytes: async () => new Uint8Array(32), toDemoEscrowAmount: BigInt,
 } });
 mock.module(new URL("../ui/Toast.tsx", import.meta.url).href, { namedExports: { useToast: () => ({
