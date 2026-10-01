@@ -69,9 +69,16 @@ test("create_round encodes Address, u64, BytesN<32>, Bytes and the enum", () => 
     commit_deadline: 1_000n,
     reveal_deadline: 2_000n,
     auditor_pubkey: Buffer.from(u8(96, 4)),
+    asset_config: {
+      asset_type: "sac",
+      contract_id: "CCXXXXXXDEMOCONTRACTIDXXXXXXXXXXXXXXXXXXXXXXX",
+      code: "USDC",
+      decimals: 7,
+      issuer: "",
+    },
   });
 
-  assert.equal(args.length, 7);
+  assert.equal(args.length, 8);
   assert.equal(scValToNative(args[0]), operator);
   assert.deepEqual(new Uint8Array(scValToNative(args[1])), u8(32, 3));
   assert.equal(scValToNative(args[2]), 19_283_746n);
@@ -80,6 +87,13 @@ test("create_round encodes Address, u64, BytesN<32>, Bytes and the enum", () => 
   assert.equal(scValToNative(args[4]), 1_000n);
   assert.equal(scValToNative(args[5]), 2_000n);
   assert.deepEqual(new Uint8Array(scValToNative(args[6])), u8(96, 4));
+  assert.deepEqual(scValToNative(args[7]), {
+    asset_type: "sac",
+    contract_id: "CCXXXXXXDEMOCONTRACTIDXXXXXXXXXXXXXXXXXXXXXXX",
+    code: "USDC",
+    decimals: 7,
+    issuer: "",
+  });
 });
 
 test("open_reveal enforces the 96-byte BLS signature width", () => {
@@ -203,6 +217,13 @@ test("ClearingRule selects the correct variant for both tags", () => {
     commit_deadline: 1_000n,
     reveal_deadline: 2_000n,
     auditor_pubkey: Buffer.from(u8(96, 4)),
+    asset_config: {
+      asset_type: "native",
+      contract_id: "",
+      code: "XLM",
+      decimals: 7,
+      issuer: "",
+    },
   };
   for (const tag of ["HighestBid", "LowestBid"] as const) {
     const args = c.spec.funcArgsToScVals("create_round", {

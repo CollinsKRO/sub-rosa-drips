@@ -7,10 +7,12 @@
 // exactly what the contract expects.
 
 import { Keypair, rpc } from "@stellar/stellar-sdk";
+import { normalizeError } from "@sub-rosa/logging/errors";
 import type {
   AssembledTransaction,
   Result,
 } from "@stellar/stellar-sdk/contract";
+import type { RoundAssetConfig } from "@sub-rosa/round-bindings";
 import { basicNodeSigner } from "@stellar/stellar-sdk/contract";
 import {
   Client as RoundContract,
@@ -27,8 +29,9 @@ import {
 } from "@sub-rosa/round-bindings/event-snapshot";
 import { toHex } from "@sub-rosa/tlock";
 import type { SealedBid } from "@sub-rosa/tlock";
-import type { RoundReceipt, RoundReceiptEvent } from "./receipt.js";
-import { validateEncryptedBlob } from "./encrypted-blob.js";
+import type { RoundReceipt } from "./receipt.js";
+import { assertSealedBid } from "./encrypted-blob.js";
+import type { SealedBidBinding } from "./encrypted-blob.js";
 import { networkFingerprint } from "./receipt.js";
 import type { TransactionSubmitter } from "./submitter.js";
 import {
@@ -38,16 +41,30 @@ import {
   type PreflightResult,
 } from "./preflight.js";
 import {
+  ESCROW_PAGE_SIZE,
+  evaluateEscrowConservation,
+  proveEscrowConservationFromPages,
+  type EscrowConservationIssue,
+  type EscrowConservationPhase,
+  type EscrowConservationReport,
+  type ProveEscrowConservationOptions,
+} from "./conservation.js";
+import {
   SubRosaClientConfigError,
-  SubRosaPaginationError,
+  SubRosaEscrowConservationError,
   SubRosaMissingReturnValueError,
   SubRosaNetworkMismatchError,
+  SubRosaAssetValidationError,
   SubRosaSubmitError,
   SubRosaTimeoutError,
   SubRosaTransactionError,
 } from "./errors.js";
 import { normalizeRoundId, normalizeSorobanContractId } from "./ids.js";
-import { validateContractNetwork } from "./network.js";
+import {
+  validateContractNetwork,
+  validatePasskeySession,
+  type PasskeySessionBinding,
+} from "./network.js";
 import {
   resolveTimeContext,
   systemTime,
@@ -96,20 +113,34 @@ export interface SubRosaClientConfig {
    */
   _sleep?: (ms: number) => Promise<void>;
   /**
-
    * The expected asset config for this round. If provided, the SDK will
    * validate that the asset matches before allowing a commit.
    * If not provided, no asset validation is performed.
    */
   assetConfig?: import("./asset-config.js").AssetConfig;
-
+  /**
    * @internal Testing hook: inject a mock Soroban RPC server for simulation.
    */
   _server?: rpc.Server;
-
 }
 
 export type ClearingRuleTag = ClearingRule["tag"];
+
+/**
+ * The contract's `RoundAssetConfig` (contracts/round/src/types.rs).
+ *
+ * Declared here rather than imported because the generated bindings in this
+ * tree predate the `asset_config` argument on `create_round`; the shape mirrors
+ * the Rust struct exactly. Once the bindings are regenerated this type and the
+ * accompanying cast at the call site can both be dropped.
+ */
+interface RoundAssetConfig {
+  asset_type: string;
+  contract_id: string;
+  code: string;
+  decimals: number;
+  issuer: string;
+}
 
 export interface CreateRoundParams {
   /** sha256 (or any opaque 32-byte ref) of the off-chain item description. */
@@ -176,6 +207,7 @@ export class SubRosaClient {
   readonly #clock: Clock;
   readonly #scheduler: Scheduler;
   readonly #server: rpc.Server;
+  readonly #session?: PasskeySessionBinding;
   #networkValidation?: Promise<void>;
 
 
@@ -222,6 +254,7 @@ export class SubRosaClient {
     const time = resolveTimeContext(systemTime, config.time);
     this.#clock = time.clock;
     this.#scheduler = time.scheduler;
+    this.#session = config.session;
     this.#server = config._server ?? new rpc.Server(config.rpcUrl, { allowHttp });
 
     if (config._sleep) this.#sleep = config._sleep;
@@ -243,6 +276,16 @@ export class SubRosaClient {
     return this.contract.spec;
   }
 
+  /** The configured source account (public key G...) if available. */
+  get account(): string | undefined {
+    return this.#source;
+  }
+
+  /** The configured passkey session binding, if any. */
+  get session(): PasskeySessionBinding | undefined {
+    return this.#session;
+  }
+
   #requireSource(role: string): string {
     if (!this.#source) {
       throw new SubRosaClientConfigError(
@@ -259,21 +302,23 @@ export class SubRosaClient {
    * Otherwise, skip validation (for backward compatibility and testing).
    * Returns a SubRosaAssetValidationError if they differ, or undefined if valid.
    */
-  #validateAssetConfig(assetConfig: import("./asset-config.js").AssetConfig): import("./errors.js").SubRosaAssetValidationError | undefined {
+  #validateAssetConfig(
+    assetConfig: import("./asset-config.js").AssetConfig,
+  ): import("./errors.js").SubRosaAssetValidationError | undefined {
     // If the client doesn't have a configured assetConfig, skip validation
     // This allows backward compatibility and testing without RPC calls
-    if (!this.#config.assetConfig && !assetConfig) return undefined;
+    if (!this.#assetConfig && !assetConfig) return undefined;
     if (!assetConfig) return undefined;
 
     // Compare type
-    if (assetConfig.type === "native" && this.#config.assetConfig!.type !== "native") {
+    if (assetConfig.type === "native" && this.#assetConfig!.type !== "native") {
       // SDK wants native in config, but user provided a token -> mismatch
       return new SubRosaAssetValidationError(
         "type",
         "round expects native XLM, but SDK config provided a token asset",
       );
     }
-    if (assetConfig.type !== "native" && this.#config.assetConfig!.type === "native") {
+    if (assetConfig.type !== "native" && this.#assetConfig!.type === "native") {
       // SDK wants a token in config, but user provided native -> mismatch
       return new SubRosaAssetValidationError(
         "type",
@@ -282,26 +327,27 @@ export class SubRosaClient {
     }
 
     // For SAC assets, compare contractId
-    if (assetConfig.type !== "native" && assetConfig.contractId !== undefined && this.#config.assetConfig!.contractId !== undefined) {
-      if (assetConfig.contractId !== this.#config.assetConfig!.contractId) {
+    if (assetConfig.type !== "native" && assetConfig.contractId !== undefined && this.#assetConfig!.contractId !== undefined) {
+      if (assetConfig.contractId !== this.#assetConfig!.contractId) {
         return new SubRosaAssetValidationError(
           "contractId",
-          `SDK contractId "${assetConfig.contractId}" does not match config's "${this.#config.assetConfig!.contractId}"`,
+          `SDK contractId "${assetConfig.contractId}" does not match config's "${this.#assetConfig!.contractId}"`,
         );
       }
     }
 
     // Compare decimals
-    if (assetConfig.decimals !== undefined && this.#config.assetConfig!.decimals !== undefined) {
-      if (assetConfig.decimals !== this.#config.assetConfig!.decimals) {
+    if (assetConfig.decimals !== undefined && this.#assetConfig!.decimals !== undefined) {
+      if (assetConfig.decimals !== this.#assetConfig!.decimals) {
         return new SubRosaAssetValidationError(
           "decimals",
-          `SDK decimals ${assetConfig.decimals} does not match config's ${this.#config.assetConfig!.decimals}`,
+          `SDK decimals ${assetConfig.decimals} does not match config's ${this.#assetConfig!.decimals}`,
         );
       }
     }
 
     return undefined;
+  }
 
   async #validatedContractCall<T>(build: () => Promise<T>): Promise<T> {
     if (!this.#networkValidation) {
@@ -381,7 +427,26 @@ export class SubRosaClient {
 
   #sleep: (ms: number) => Promise<void> = (ms) => this.#scheduler.sleep(ms);
 
-  // ── State-changing calls (sign + submit over RPC) ──────────────────────
+  // ── State-changing calls (sign + submit over RPC) ──────────────────────  /** Build the on-chain asset_config argument from SDK params. */
+  #buildAssetConfig(params: CreateRoundParams): RoundAssetConfig {
+    if (!params.assetConfig) {
+      return {
+        asset_type: "native",
+        contract_id: "",
+        code: "XLM",
+        decimals: 7,
+        issuer: "",
+      };
+    }
+    const { type, code, contractId, issuer, decimals } = params.assetConfig;
+    return {
+      asset_type: type,
+      contract_id: contractId || "",
+      code: code || "XLM",
+      decimals: decimals ?? 7,
+      issuer: issuer || "",
+    };
+  }
 
   async createRound(params: CreateRoundParams): Promise<bigint> {
     const operator = params.operator ?? this.#requireSource("operator");
@@ -390,13 +455,13 @@ export class SubRosaClient {
       values: undefined,
     } as ClearingRule;    
     // Build asset config for the round
-    let assetConfig: types.RoundAssetConfig = {
+    let assetConfig: RoundAssetConfig = {
       asset_type: "native",
       contract_id: "",
       code: "XLM",
-      decimals: 77 стиховая логика
-
-3.144:    };
+      decimals: 7,
+      issuer: "",
+    };
     if (params.assetConfig) {
       const { type, code, contractId, issuer, decimals } = params.assetConfig;
       assetConfig = {
@@ -408,17 +473,6 @@ export class SubRosaClient {
       };
     }
     
-    const tx = await this.contract.create_round({
-      operator,
-      item_ref: toBuffer(params.itemRef),
-      reveal_round: toBigInt(params.revealRound),
-      clearing_rule,
-      commit_deadline: toBigInt(params.commitDeadline),
-      reveal_deadline: toBigInt(params.revealDeadline),
-      auditor_pubkey: toBuffer(params.auditorPubkey),
-      asset_config: assetConfig,
-    });
-
     const tx = await this.#validatedContractCall(() =>
       this.contract.create_round({
         operator,
@@ -428,37 +482,24 @@ export class SubRosaClient {
         commit_deadline: toBigInt(params.commitDeadline),
         reveal_deadline: toBigInt(params.revealDeadline),
         auditor_pubkey: toBuffer(params.auditorPubkey),
-      }),
+        asset_config: assetConfig,
+      } as Parameters<typeof this.contract.create_round>[0]),
     );
 
     return this.#sendUnwrap(tx);
   }
 
   async commit(params: CommitParams): Promise<void> {
-    // Validate encrypted blobs before submitting — catches size/encoding
-    // issues early, before paying gas for an on-chain revert (PayloadTooLarge).
-    const ciphertextResult = validateEncryptedBlob(
-      params.sealed.ciphertext,
-      "ciphertext",
-    );
-    if (!ciphertextResult.valid) {
-      throw new SubRosaClientConfigError(
-        ciphertextResult.issues.map((i) => i.message).join("; "),
-      );
-    }
-    const auditorBlobResult = validateEncryptedBlob(
-      params.sealed.auditorBlob,
-      "auditor_blob",
-    );
-    if (!auditorBlobResult.valid) {
-      throw new SubRosaClientConfigError(
-        auditorBlobResult.issues.map((i) => i.message).join("; "),
-      );
-    }
+    // Gate the seal before submitting. Size/encoding defects surface here
+    // instead of as an on-chain PayloadTooLarge revert, and — when the caller
+    // passes the value/nonce/round it sealed from — a blob whose commitment
+    // does not match never reaches the chain, where it would be committed and
+    // never open.
+    assertSealedBid(params.sealed, params.binding);
 
     // Validate asset config matches the round's expected asset
-    if (this.#config.assetConfig) {
-      const assetError = this.#validateAssetConfig(this.#config.assetConfig);
+    if (this.#assetConfig) {
+      const assetError = this.#validateAssetConfig(this.#assetConfig);
       if (assetError) {
         throw assetError;
       }
@@ -567,6 +608,7 @@ export class SubRosaClient {
         tag: params.clearingRule ?? "HighestBid",
         values: undefined,
       } as ClearingRule;
+      const asset_config = this.#buildAssetConfig(params);
       return this.#validatedContractCall(() =>
         this.contract.create_round({
           operator,
@@ -576,13 +618,22 @@ export class SubRosaClient {
           commit_deadline: toBigInt(params.commitDeadline),
           reveal_deadline: toBigInt(params.revealDeadline),
           auditor_pubkey: toBuffer(params.auditorPubkey),
+          asset_config,
         }),
       );
     });
   }
 
   /** Simulate `commit` without signing or submitting. */
-  preflightCommit(params: CommitParams): Promise<PreflightResult<void>> {
+  async preflightCommit(params: CommitParams): Promise<PreflightResult<void>> {
+    const session = params.session ?? this.#session;
+    if (session) {
+      validatePasskeySession(session, {
+        contractId: this.contractId,
+        networkPassphrase: this.networkPassphrase,
+        account: params.bidder ?? this.#source,
+      });
+    }
     return this.#preflight("commit", () => {
       const bidder = params.bidder ?? this.#requireSource("bidder");
       const rawSealRound = params.sealRound ?? (params.sealed as { sealRound?: number | bigint }).sealRound;
@@ -669,6 +720,145 @@ export class SubRosaClient {
         this.contract.void({ round_id: toBigInt(roundId) }),
       ),
     );
+  }
+
+  // ── Escrow conservation (issue #374) ──────────────────────────────────
+
+  /**
+   * Re-derive a round's escrow accounting from the bidder index and prove it
+   * balances before any payout runs.
+   *
+   * This is the off-chain mirror of the contract's `EscrowNotConserved` guard:
+   * the escrow the index attributes to the round must be exactly the escrow
+   * the pending operation moves, and every bidder must have a readable, unpaid
+   * bid state. Never throws — a drifted or unreadable index comes back as an
+   * issue on the report with `conserved: false`.
+   *
+   * @param phase Operation about to run. `settle` also accounts for the
+   *   operator payout recorded by `clear`.
+   */
+  async proveEscrowConservation(
+    roundId: number | bigint,
+    phase: EscrowConservationPhase = "settle",
+    options: ProveEscrowConservationOptions = {},
+  ): Promise<EscrowConservationReport> {
+    const rid = normalizeRoundId(roundId);
+    const round = await this.getRound(rid);
+    const issues: EscrowConservationIssue[] = [...(options.issues ?? [])];
+
+    // `clear` and `void` only move escrow out of a revealing round; `settle`
+    // only pays out of a cleared one.
+    const expected = phase === "settle" ? "Cleared" : "Revealing";
+    if (round.status.tag !== expected) {
+      issues.push({
+        code: "round_wrong_status",
+        message: `round ${rid} is ${round.status.tag}; ${phase} requires ${expected}`,
+      });
+    }
+    if (phase === "settle") {
+      if (!round.winner) {
+        issues.push({
+          code: "no_winner",
+          message: `round ${rid} was cleared without a winner, so it cannot be settled`,
+        });
+      } else if (round.winning_bid === undefined) {
+        issues.push({
+          code: "no_winner",
+          message: `round ${rid} has a winner but no winning bid to pay out`,
+        });
+      }
+    }
+
+    const payable =
+      phase === "settle" && round.winning_bid !== undefined && round.winner
+        ? BigInt(round.winning_bid)
+        : 0n;
+
+    return proveEscrowConservationFromPages(
+      {
+        getBiddersPage: async (cursor, limit) =>
+          (await this.getBiddersPage(rid, cursor, limit)) as BiddersPage,
+        getBidState: async (bidder) => {
+          try {
+            return await this.getBidState(rid, bidder);
+          } catch {
+            return undefined;
+          }
+        },
+      },
+      {
+        pageSize: ESCROW_PAGE_SIZE,
+        ...options,
+        payable,
+        // The contract pays out of `round.bidders`, so the paged walk is
+        // cross-checked against the list the round record already carries.
+        expectedBidders: options.expectedBidders ?? round.bidders,
+        // A void pays nobody, so the winner's surplus is not in play; a settle
+        // returns the winner's escrow above their bid.
+        ...(phase === "settle" && round.winner
+          ? { winner: round.winner }
+          : {}),
+        issues,
+      },
+    );
+  }
+
+  /**
+   * Preflight `settle` against escrow conservation.
+   *
+   * Resolves with a conserved report, or fails with the typed
+   * `SubRosaEscrowConservationError` — no transaction is built either way.
+   */
+  async preflightSettleConservation(
+    roundId: number | bigint,
+    options: ProveEscrowConservationOptions = {},
+  ): Promise<EscrowConservationReport> {
+    const rid = normalizeRoundId(roundId);
+    let report: EscrowConservationReport;
+    try {
+      report = await this.proveEscrowConservation(rid, "settle", options);
+    } catch (cause) {
+      throw new SubRosaEscrowConservationError({
+        roundId: rid,
+        phase: "settle",
+        report: evaluateEscrowConservation({
+          bidders: 0,
+          escrowHeld: 0n,
+          refundable: 0n,
+          payable: 0n,
+          winnerEscrow: 0n,
+          issues: [
+            {
+              code: "bid_state_missing",
+              message: `escrow accounting could not be read: ${normalizeError(cause).message}`,
+            },
+          ],
+        }),
+        cause,
+      });
+    }
+    if (!report.conserved) {
+      throw new SubRosaEscrowConservationError({
+        roundId: rid,
+        phase: "settle",
+        report,
+      });
+    }
+    return report;
+  }
+
+  /** Preflight `void`: every escrow must be refundable and nothing may already
+   *  be settled, because a void pays nobody. */
+  async preflightVoidConservation(
+    roundId: number | bigint,
+    options: ProveEscrowConservationOptions = {},
+  ): Promise<EscrowConservationReport> {
+    const rid = normalizeRoundId(roundId);
+    const report = await this.proveEscrowConservation(rid, "void", options);
+    if (!report.conserved) {
+      throw new SubRosaEscrowConservationError({ roundId: rid, phase: "void", report });
+    }
+    return report;
   }
 
   // ── Read-only views (simulation only; no signing/submission) ───────────

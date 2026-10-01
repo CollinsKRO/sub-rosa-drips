@@ -70,8 +70,17 @@ interface FakeSdkOptions {
 /**
  * A minimal SDK over an in-memory round. It only implements the paths a
  * Cleared round takes through `watchRound`; anything else fails loudly.
+ *
+ * The round it serves is a fully revealed, cleared auction (two bidders, one
+ * winner) so the settlement guard can verify the winner and the refund set
+ * exactly the way it does against a real chain.
  */
 function createSdk(chain: FakeChain, label: string, options: FakeSdkOptions = {}): SubRosaClient {
+  const bidders = ["GAAA", "GBBB"];
+  const state: Record<string, { escrow: bigint; revealed_value: bigint }> = {
+    GAAA: { escrow: 700n, revealed_value: 700n },
+    GBBB: { escrow: 500n, revealed_value: 500n },
+  };
   const sdk = {
     async getRound(id: bigint) {
       if (id !== 1n) {
@@ -81,7 +90,25 @@ function createSdk(chain: FakeChain, label: string, options: FakeSdkOptions = {}
         status: { tag: chain.status },
         reveal_round: "1",
         reveal_deadline: "0",
-        winner: null,
+        commit_deadline: "0",
+        bidders,
+        winner: "GAAA",
+        winning_bid: 700n,
+        clearing_rule: { tag: "HighestBid" },
+      };
+    },
+    async getBiddersPage(_id: bigint, _cursor: number, _limit: number) {
+      return { data: bidders, next_cursor: 0, total: bidders.length };
+    },
+    async getBidState(_id: bigint, bidder: string) {
+      const s = state[bidder];
+      if (!s) throw new Error(`HostError: BidNotFound(${bidder})`);
+      return {
+        escrow: s.escrow,
+        revealed_value: s.revealed_value,
+        revealed_nonce: 1n,
+        settled: false,
+        valid: true,
       };
     },
     async settle(_id: bigint) {
@@ -101,9 +128,6 @@ function createSdk(chain: FakeChain, label: string, options: FakeSdkOptions = {}
     },
     async bidders() {
       throw new Error("bidders must not run for a Cleared round");
-    },
-    async getBidState() {
-      throw new Error("getBidState must not run for a Cleared round");
     },
     async getSeal() {
       return null;

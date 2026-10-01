@@ -14,12 +14,11 @@ import {
   TransactionBuilder,
   xdr,
 } from "@stellar/stellar-sdk";
-import { ASSET_CONFIG } from "@sub-rosa/sdk/asset-config";
-
 const HORIZON_URL = process.env.HORIZON_URL ?? "https://horizon-testnet.stellar.org";
 const NETWORK = process.env.NETWORK_PASSTHRASE ?? Networks.TESTNET;
 const ASSET_CODE = process.env.ASSET_CODE ?? "USDC";
 const MINT_AMOUNT = process.env.MINT_AMOUNT ?? "1000";
+const EXPECTED_DECIMALS = 7;
 
 const reqEnv = (n: string): string => {
   const v = process.env[n];
@@ -29,42 +28,41 @@ const reqEnv = (n: string): string => {
 
 export function assertUsdcSetupGuard(params: {
   passphrase: string;
+  issuerPublicKey: string;
   sacContractId: string;
   decimals: number;
 }): void {
-  const { passphrase, sacContractId, decimals } = params;
+  const { passphrase, issuerPublicKey, sacContractId, decimals } = params;
 
   if (passphrase === Networks.PUBLIC) {
     throw new Error("refusing to run USDC setup on mainnet (public network passphrase)");
   }
 
-  if (passphrase !== ASSET_CONFIG.passphrase) {
+  // The SAC contract id is derived from the issuing account, so the guard
+  // recomputes it locally instead of trusting caller-supplied configuration.
+  const expectedSacContractId = new Asset(ASSET_CODE, issuerPublicKey).contractId(passphrase);
+
+  if (sacContractId !== expectedSacContractId) {
     throw new Error(
-      `passphrase mismatch: got ${passphrase}, expected ${ASSET_CONFIG.passphrase}`,
+      `SAC contract id mismatch: got ${sacContractId}, expected ${expectedSacContractId}`,
     );
   }
 
-  if (sacContractId !== ASSET_CONFIG.sacContractId) {
+  if (decimals !== EXPECTED_DECIMALS) {
     throw new Error(
-      `SAC contract id mismatch: got ${sacContractId}, expected ${ASSET_CONFIG.sacContractId}`,
-    );
-  }
-
-  if (decimals !== ASSET_CONFIG.decimals) {
-    throw new Error(
-      `decimals mismatch: got ${decimals}, expected ${ASSET_CONFIG.decimals}`,
+      `decimals mismatch: got ${decimals}, expected ${EXPECTED_DECIMALS}`,
     );
   }
 }
 
 async function main() {
+  const issuerKp = Keypair.fromSecret(reqEnv("ISSUER_SECRET"));
   assertUsdcSetupGuard({
     passphrase: NETWORK,
+    issuerPublicKey: issuerKp.publicKey(),
     sacContractId: reqEnv("SAC_CONTRACT_ID"),
-    decimals: Number(process.env.DECIMALS ?? String(ASSET_CONFIG.decimals)),
+    decimals: Number(process.env.DECIMALS ?? String(EXPECTED_DECIMALS)),
   });
-
-  const issuerKp = Keypair.fromSecret(reqEnv("ISSUER_SECRET"));
   const p1 = Keypair.fromSecret(reqEnv("PRINCIPAL1_SECRET"));
   const p2 = Keypair.fromSecret(reqEnv("PRINCIPAL2_SECRET"));
   const appraisalServer = Keypair.fromSecret(reqEnv("APPRAISALD_SERVER_SECRET"));

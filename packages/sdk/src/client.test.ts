@@ -1,19 +1,20 @@
 // Copyright (c) 2026 Sub Rosa contributors
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { readFileSync } from "node:fs";
-import { rpc, StrKey } from "@stellar/stellar-sdk";
+import { Keypair, rpc, StrKey } from "@stellar/stellar-sdk";
 
 import { SubRosaClient } from "./client.js";
 import {
   SubRosaClientConfigError,
-  SubRosaPaginationError,
+  SubRosaNetworkMismatchError,
+  SubRosaSessionMismatchError,
   SubRosaSubmitError,
 } from "./errors.js";
 import type {
   SubmitSignedTransactionParams,
   TransactionSubmitter,
 } from "./submitter.js";
+import { sealFixture, fixtureBinding } from "./testing/seal-fixture.js";
 
 const BASE_CONFIG = {
   rpcUrl: "https://example.com",
@@ -237,6 +238,11 @@ describe("SubRosaClient source configuration", () => {
   it("rejects commit without a bidder source using a typed error", async () => {
     const client = new SubRosaClient(BASE_CONFIG);
 
+    // A real seal: commit() runs the sealed-bid gate before it resolves the
+    // bidder source, so a placeholder blob would fail on its own terms and
+    // this test would stop being about the source check.
+    const sealed = await sealFixture();
+
     await assert.rejects(
       client.commit({
         roundId: 1,
@@ -247,6 +253,7 @@ describe("SubRosaClient source configuration", () => {
           sealRound: 1,
         },
         escrow: 1n,
+        binding: fixtureBinding(),
       }),
       (error: unknown) => {
         assert.ok(error instanceof SubRosaClientConfigError);
@@ -304,3 +311,123 @@ describe("SubRosaClient external submitter failures", () => {
     });
   });
 });
+
+describe("SubRosaClient passkey session binding", () => {
+  const SWAPPED_CONTRACT_ID = StrKey.encodeContract(Buffer.alloc(32, 2));
+  const PUBLIC_PASSPHRASE = "Public Global Stellar Network ; September 2015";
+  const FIXTURE_SEED = Keypair.random().secret();
+
+  const VALID_COMMIT_PARAMS = {
+    roundId: 1,
+    sealed: {
+      commitment: new Uint8Array(32),
+      ciphertext: new Uint8Array([0x61, 0x67, 0x65]),
+      auditorBlob: new Uint8Array(1),
+    },
+    escrow: 100_000n,
+    bidder: PUBLIC_KEY,
+  };
+
+  it("exposes account and session properties", () => {
+    const session = {
+      contractId: BASE_CONFIG.contractId,
+      networkPassphrase: BASE_CONFIG.networkPassphrase,
+      account: PUBLIC_KEY,
+    };
+    const client = new SubRosaClient({
+      ...BASE_CONFIG,
+      publicKey: PUBLIC_KEY,
+      session,
+    });
+    assert.equal(client.account, PUBLIC_KEY);
+    assert.deepEqual(client.session, session);
+  });
+
+  it("refuses commit when session contract id does not match client", async () => {
+    const client = new SubRosaClient({
+      ...BASE_CONFIG,
+      publicKey: PUBLIC_KEY,
+    });
+
+    await assert.rejects(
+      client.commit({
+        ...VALID_COMMIT_PARAMS,
+        session: {
+          contractId: SWAPPED_CONTRACT_ID,
+          networkPassphrase: BASE_CONFIG.networkPassphrase,
+          account: PUBLIC_KEY,
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubRosaNetworkMismatchError);
+        assert.ok(error instanceof SubRosaSessionMismatchError);
+        assert.equal((error as SubRosaNetworkMismatchError).reason, "contract_mismatch");
+        return true;
+      },
+    );
+  });
+
+  it("refuses commit when session network passphrase does not match client", async () => {
+    const client = new SubRosaClient({
+      ...BASE_CONFIG,
+      publicKey: PUBLIC_KEY,
+    });
+
+    await assert.rejects(
+      client.commit({
+        ...VALID_COMMIT_PARAMS,
+        session: {
+          contractId: BASE_CONFIG.contractId,
+          networkPassphrase: PUBLIC_PASSPHRASE,
+          account: PUBLIC_KEY,
+        },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubRosaNetworkMismatchError);
+        assert.ok(error instanceof SubRosaSessionMismatchError);
+        assert.equal((error as SubRosaNetworkMismatchError).reason, "session_mismatch");
+        return true;
+      },
+    );
+  });
+
+  it("refuses preflightCommit when session does not match", async () => {
+    const client = new SubRosaClient({
+      ...BASE_CONFIG,
+      publicKey: PUBLIC_KEY,
+      session: {
+        contractId: SWAPPED_CONTRACT_ID,
+        networkPassphrase: BASE_CONFIG.networkPassphrase,
+        account: PUBLIC_KEY,
+      },
+    });
+
+    await assert.rejects(
+      client.preflightCommit(VALID_COMMIT_PARAMS),
+      SubRosaNetworkMismatchError,
+    );
+  });
+
+  it("does not leak secret seed in session mismatch errors", async () => {
+    const client = new SubRosaClient({
+      ...BASE_CONFIG,
+      secretKey: FIXTURE_SEED,
+    });
+
+    try {
+      await client.commit({
+        ...VALID_COMMIT_PARAMS,
+        session: {
+          contractId: SWAPPED_CONTRACT_ID,
+          networkPassphrase: BASE_CONFIG.networkPassphrase,
+        },
+      });
+      assert.fail("should have thrown");
+    } catch (e) {
+      assert.ok(e instanceof Error);
+      assert.ok(!e.message.includes(FIXTURE_SEED));
+      assert.ok(!/\bS[A-Z2-7]{55}\b/.test(e.message));
+    }
+  });
+});
+

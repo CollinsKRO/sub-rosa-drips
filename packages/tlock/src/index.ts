@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Sub Rosa contributors
 export {
   commitment,
+  commitmentMatches,
   encodeBidPreimage,
   decodeBidPreimage,
   i128ToBeBytes,
@@ -11,7 +12,22 @@ export {
   VALUE_BYTES,
   NONCE_BYTES,
   PREIMAGE_BYTES,
+  COMMITMENT_BYTES,
 } from "./commitment.js";
+
+export {
+  parseSealedPayload,
+  isSealedBidPayload,
+  ARMOR_LINE_WIDTH,
+  TLOCK_ARMOR_HEADER,
+  TLOCK_ARMOR_FOOTER,
+  AGE_VERSION,
+  TLOCK_STANZA_TYPE,
+  SEALED_BID_PLAINTEXT_BYTES,
+  type SealedPayloadHeader,
+  type SealedPayloadParse,
+  type SealedPayloadRejection,
+} from "./ciphertext.js";
 
 export {
   generateAuditorKeypair,
@@ -38,6 +54,10 @@ export {
   fetchRoundBeacon,
   fetchRoundSignature,
   QUICKNET_HASH,
+  QUICKNET_GENESIS,
+  QUICKNET_PERIOD,
+  QUICKNET_FIXTURE,
+  assertQuicknetFixture,
   type DrandClient,
 } from "./quicknet.js";
 
@@ -60,6 +80,7 @@ export {
 } from "./seal.js";
 
 export {
+  computePublishAtMs,
   classifyDrandRound,
   DEFAULT_STALE_THRESHOLD_MS,
   type DrandRoundInfo,

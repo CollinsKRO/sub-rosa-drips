@@ -2,14 +2,19 @@
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, Address, Bytes, BytesN, ConversionError, Env, InvokeError, Vec,
+    token, Address, Bytes, BytesN, ConversionError, Env, InvokeError, String, Vec,
 };
 use soroban_sdk::testutils::storage::Temporary as TemporaryStorageTest;
 
 use crate::drand;
-use crate::storage::{seal_ttl_for_reveal_deadline, TEMP_THRESHOLD};
-use crate::types::{ClearingRule, DataKey, Error, GlobalConfig, Status};
-use crate::{SubRosaRound, SubRosaRoundClient};
+use crate::storage::{
+    get_round, get_state, seal_ttl_for_reveal_deadline, set_round, set_state, try_get_ledger,
+    TEMP_THRESHOLD,
+};
+use crate::types::{
+    BidState, ClearingRule, DataKey, Error, EscrowLedger, GlobalConfig, Round, Status,
+};
+use crate::{conserved, SubRosaRound, SubRosaRoundClient};
 
 // ── Dummy fixture (no BLS) — only for tests that never call open_reveal ──────
 const GENESIS: u64 = 0;
@@ -140,6 +145,7 @@ fn drand_round(f: &Fixture, operator: &Address, commit_deadline: u64, reveal_dea
         &commit_deadline,
         &reveal_deadline,
         &Bytes::from_array(&f.env, b"auditor"),
+        &native_xlm(&f.env),
     )
 }
 
@@ -159,14 +165,21 @@ fn b32(env: &Env, byte: u8) -> BytesN<32> {
     BytesN::from_array(env, &[byte; 32])
 }
 
-fn open_round(f: &Fixture, operator: &Address) -> u64 {
-    let asset_config = RoundAssetConfig {
-        asset_type: "sac".to_string(),
-        contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4".to_string(),
-        code: "USDC".to_string(),
+/// Native XLM asset config, the default for tests that don't exercise SAC
+/// binding. `create_round` takes it on every call but does not itself validate
+/// the fields, so tests that only need a well-formed round pass this.
+pub fn native_xlm(env: &Env) -> RoundAssetConfig {
+    RoundAssetConfig {
+        asset_type: String::from_str(env, "native"),
+        contract_id: String::from_str(env, ""),
+        code: String::from_str(env, "XLM"),
         decimals: 7,
-        issuer: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF".to_string(),
-    };
+        issuer: String::from_str(env, ""),
+    }
+}
+
+fn open_round(f: &Fixture, operator: &Address) -> u64 {
+    let asset_config = sac_asset_config(&f.env);
     f.client.create_round(
         operator,
         &b32(&f.env, 1),
@@ -175,7 +188,7 @@ fn open_round(f: &Fixture, operator: &Address) -> u64 {
         &1_500,
         &2_500,
         &Bytes::from_array(&f.env, b"auditor-pubkey"),
-        asset_config,
+        &native_xlm(&f.env),
     )
 }
 
@@ -304,14 +317,7 @@ fn create_round_rejects_commit_after_reveal() {
     let operator = Address::generate(&f.env);
     let res = f.client.try_create_round(
         &operator, &b32(&f.env, 1), &2_000, &ClearingRule::HighestBid,
-        &2_000, &2_500, &Bytes::from_array(&f.env, b"a"),
-        RoundAssetConfig {
-            asset_type: "sac".to_string(),
-            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4".to_string(),
-            code: "USDC".to_string(),
-            decimals: 7,
-            issuer: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF".to_string(),
-        },
+        &2_000, &2_500, &Bytes::from_array(&f.env, b"a"), &native_xlm(&f.env),
     );
     assert!(res.is_err());
 }
@@ -322,14 +328,7 @@ fn create_round_rejects_deadline_in_past() {
     let operator = Address::generate(&f.env);
     let res = f.client.try_create_round(
         &operator, &b32(&f.env, 1), &2_000, &ClearingRule::HighestBid,
-        &500, &2_500, &Bytes::from_array(&f.env, b"a"),
-        RoundAssetConfig {
-            asset_type: "sac".to_string(),
-            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4".to_string(),
-            code: "USDC".to_string(),
-            decimals: 7,
-            issuer: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF".to_string(),
-        },
+        &500, &2_500, &Bytes::from_array(&f.env, b"a"), &native_xlm(&f.env),
     );
     assert!(res.is_err());
 }
@@ -1124,6 +1123,7 @@ fn full_lifecycle_real_drand_signature() {
     let id = f.client.create_round(
         &operator, &b32(&f.env, 0xAB), &VEC_ROUND, &ClearingRule::HighestBid,
         &commit_deadline, &reveal_deadline, &Bytes::from_array(&f.env, b"auditor"),
+        &native_xlm(&f.env),
     );
 
     let alice = funded_bidder(&f, 1_000);
@@ -1484,6 +1484,755 @@ fn observer_reads_round_and_bid_state_after_lifecycle_completion() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ISSUE #374 — ESCROW CONSERVATION (partial reveal, void, settle)
+//
+// One predicate, proved by the contract on reveal, clear/void, and settle:
+// committed escrow equals the settled payout plus refunds plus the balance still
+// locked, and every locked dollar is backed by an unsettled bid in the round's
+// bidder index. These tests pin both directions — the lifecycles that must stay
+// allowed, and the mint / drop / double-pay paths that must fail.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn ledger(f: &Fixture, round_id: u64) -> EscrowLedger {
+    f.env
+        .as_contract(&f.client.address, || try_get_ledger(&f.env, round_id))
+        .expect("escrow ledger must exist once escrow has been committed")
+}
+
+fn assert_conserved(f: &Fixture, round_id: u64, label: &str) {
+    let l = ledger(f, round_id);
+    assert!(
+        conserved(l.committed, l.payout, l.refunds, l.locked),
+        "{label}: committed {} != payout {} + refunds {} + locked {}",
+        l.committed,
+        l.payout,
+        l.refunds,
+        l.locked,
+    );
+}
+
+/// Mutate the round record directly, standing in for any drift between the
+/// bidder index a terminal path pays from and the set that was escrowed.
+fn tamper_round(f: &Fixture, round_id: u64, mutate: impl FnOnce(&mut Round)) {
+    f.env.as_contract(&f.client.address, || {
+        let mut round = get_round(&f.env, round_id).unwrap();
+        mutate(&mut round);
+        set_round(&f.env, round_id, &round);
+    });
+}
+
+/// Remove one address from the bidder index while leaving its escrow locked.
+fn drop_bidder_from_index(f: &Fixture, round_id: u64, dropped: &Address) {
+    f.env.as_contract(&f.client.address, || {
+        let mut round = get_round(&f.env, round_id).unwrap();
+        let mut kept = Vec::new(&f.env);
+        for bidder in round.bidders.iter() {
+            if bidder != *dropped {
+                kept.push_back(bidder);
+            }
+        }
+        round.bidders = kept;
+        set_round(&f.env, round_id, &round);
+    });
+}
+
+/// Flag a bid as already settled without paying it.
+fn mark_settled(f: &Fixture, round_id: u64, bidder: &Address) {
+    f.env.as_contract(&f.client.address, || {
+        let mut state: BidState = get_state(&f.env, round_id, bidder).unwrap();
+        state.settled = true;
+        set_state(&f.env, round_id, bidder, &state);
+    });
+}
+
+#[test]
+fn conservation_predicate_table_driven() {
+    // (committed, payout, refunds, locked, expected)
+    let cases: &[(i128, i128, i128, i128, bool)] = &[
+        (0, 0, 0, 0, true),             // nothing committed, nothing moved
+        (1_200, 0, 0, 1_200, true),     // open round: every escrow locked
+        (1_200, 700, 500, 0, true),     // settled: payout + refunds drain escrow
+        (1_200, 200, 1_000, 0, true),   // voided: refunds drain escrow
+        (1_200, 700, 500, 100, false),  // drop: escrow still locked after settlement
+        (1_200, 1_300, 0, 0, false),    // mint: paid out more than was committed
+        (1_200, 1_200, 0, 0, true),     // the whole escrow can go to the operator
+        (1_200, 700, 400, 0, false),    // drop: refunds short of committed - payout
+        (1_200, 700, 700, 0, false),    // mint: refunds exceed the escrow held
+        (0, 0, 100, 0, false),          // refunds with nothing ever committed
+        (1_200, -700, 1_900, 0, false), // a negative flow is not conservation
+        (1_200, 700, 500, -1, false),   // refunded past the locked balance
+    ];
+    for (i, (committed, payout, refunds, locked, expected)) in cases.iter().enumerate() {
+        assert_eq!(
+            conserved(*committed, *payout, *refunds, *locked),
+            *expected,
+            "case {}: conserved({committed}, {payout}, {refunds}, {locked})",
+            i,
+        );
+    }
+}
+
+#[test]
+fn escrow_ledger_tracks_commits_overwrites_and_settlement() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    let alice = funded_bidder(&f, 2_000);
+    let bob = funded_bidder(&f, 2_000);
+
+    commit_bid(&f, id, &alice, 700, 900, 0x01);
+    assert_eq!(
+        (ledger(&f, id).committed, ledger(&f, id).locked),
+        (900, 900),
+        "one commit locks exactly its escrow"
+    );
+
+    // Overwrite before close: the returned escrow is a refund, and `committed`
+    // stays cumulative so the identity keeps holding.
+    let a_nonce = commit_bid(&f, id, &alice, 700, 700, 0x02);
+    let b_nonce = commit_bid(&f, id, &bob, 400, 1_000, 0x03);
+    let l = ledger(&f, id);
+    assert_eq!(
+        (l.committed, l.refunds, l.locked),
+        (2_600, 900, 1_700),
+        "900 + 700 + 1_000 committed, the 900 overwritten escrow returned"
+    );
+    assert_conserved(&f, id, "after commits with an overwrite");
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    f.client.reveal(&id, &alice, &700, &a_nonce);
+    f.client.reveal(&id, &bob, &400, &b_nonce);
+    assert_conserved(&f, id, "during reveal");
+
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp = reveal_deadline + 1);
+    f.client.clear(&id);
+    f.client.settle(&id);
+
+    let settled = ledger(&f, id);
+    assert_eq!(
+        (
+            settled.committed,
+            settled.payout,
+            settled.refunds,
+            settled.locked
+        ),
+        (2_600, 700, 1_900, 0),
+        "operator takes the 700 bid, both surplus and loser's escrow come back"
+    );
+    assert_conserved(&f, id, "after settle");
+    assert_eq!(f.usdc_token.balance(&operator), 700);
+    assert_eq!(
+        f.usdc_token.balance(&alice),
+        1_300,
+        "700 surplus plus 600 never escrowed"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&bob),
+        2_000,
+        "the loser's escrow came back in full"
+    );
+    assert_eq!(f.usdc_token.balance(&f.client.address), 0);
+}
+
+#[test]
+fn partial_reveal_refunds_every_unrevealed_bidder_exactly_once() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    let winner = funded_bidder(&f, 700);
+    let silent = funded_bidder(&f, 300);
+    let quiet = funded_bidder(&f, 200);
+    let w_nonce = commit_bid(&f, id, &winner, 500, 700, 0x01);
+    commit_bid(&f, id, &silent, 999, 300, 0x02);
+    commit_bid(&f, id, &quiet, 888, 200, 0x03);
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    // One of three bids reveals; the two larger unrevealed bids must be
+    // refunded in full rather than settled against.
+    f.client.reveal(&id, &winner, &500, &w_nonce);
+    assert_conserved(&f, id, "one bid of three revealed");
+
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp = reveal_deadline + 1);
+    assert_eq!(f.client.clear(&id), Some(winner.clone()));
+    assert_conserved(&f, id, "after clearing a partially revealed round");
+
+    f.client.settle(&id);
+    let settled = ledger(&f, id);
+    assert_eq!(
+        (
+            settled.committed,
+            settled.payout,
+            settled.refunds,
+            settled.locked
+        ),
+        (1_200, 500, 700, 0),
+        "only the revealed winner pays; everyone else is made whole"
+    );
+    assert_conserved(&f, id, "after settling a partially revealed round");
+
+    assert_eq!(
+        f.usdc_token.balance(&operator),
+        500,
+        "operator takes the winning bid"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&winner),
+        200,
+        "winner surplus of 200 over a 500 bid"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&silent),
+        300,
+        "unrevealed bidder refunded once"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&quiet),
+        200,
+        "unrevealed bidder refunded once"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&f.client.address),
+        0,
+        "no escrow stranded"
+    );
+
+    for bidder in [winner, silent, quiet] {
+        let state = f.client.get_bid_state(&id, &bidder);
+        assert!(state.settled, "each bid is marked settled exactly once");
+    }
+}
+
+#[test]
+fn zero_revealed_bids_void_refunds_every_bidder_exactly_once() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    let a = funded_bidder(&f, 1_000);
+    let b = funded_bidder(&f, 1_000);
+    let c = funded_bidder(&f, 1_000);
+    commit_bid(&f, id, &a, 700, 700, 0x01);
+    commit_bid(&f, id, &b, 500, 500, 0x02);
+    commit_bid(&f, id, &c, 300, 300, 0x03);
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    assert_conserved(&f, id, "reveal open with zero reveals");
+
+    // Nobody reveals, so clearing voids the round and refunds the whole round.
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp = reveal_deadline + 1);
+    assert_eq!(f.client.clear(&id), None);
+    let settled = ledger(&f, id);
+    assert_eq!(
+        (
+            settled.committed,
+            settled.payout,
+            settled.refunds,
+            settled.locked
+        ),
+        (1_500, 0, 1_500, 0),
+        "a void refunds every escrow and pays nobody"
+    );
+    assert_conserved(&f, id, "after voiding an unrevealed round");
+
+    assert_eq!(f.usdc_token.balance(&operator), 0, "a void pays nobody");
+    assert_eq!(f.usdc_token.balance(&a), 1_000);
+    assert_eq!(f.usdc_token.balance(&b), 1_000);
+    assert_eq!(f.usdc_token.balance(&c), 1_000);
+    assert_eq!(f.usdc_token.balance(&f.client.address), 0);
+
+    // Refunds are exactly once: a second attempt is rejected, not repeated.
+    assert_try_contract_err(f.client.try_clear(&id), Error::RoundVoided);
+    assert_try_contract_err(f.client.try_settle(&id), Error::RoundVoided);
+    assert_eq!(f.usdc_token.balance(&a), 1_000, "no second refund");
+    assert_eq!(f.usdc_token.balance(&b), 1_000, "no second refund");
+    assert_eq!(f.usdc_token.balance(&c), 1_000, "no second refund");
+}
+
+#[test]
+fn empty_round_conserves_escrow_on_void_and_settle_paths() {
+    // A round nobody bid on: zero escrow, zero revealed, zero refunded.
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp = reveal_deadline + 1);
+    assert_eq!(f.client.clear(&id), None);
+    assert_conserved(&f, id, "empty round voided through clear");
+    let l = ledger(&f, id);
+    assert_eq!((l.committed, l.payout, l.refunds, l.locked), (0, 0, 0, 0));
+    assert_eq!(f.usdc_token.balance(&f.client.address), 0);
+    assert_eq!(f.client.get_round(&id).status, Status::Voided);
+
+    // The explicit liveness valve on an untouched round behaves the same way.
+    let f2 = setup();
+    let operator2 = Address::generate(&f2.env);
+    let id2 = open_round(&f2, &operator2);
+    f2.env
+        .ledger()
+        .with_mut(|l| l.timestamp = 2_500 + 3_600 + 1);
+    f2.client.void(&id2);
+    assert_conserved(&f2, id2, "empty round voided through void");
+    assert_eq!(f2.usdc_token.balance(&f2.client.address), 0);
+}
+
+/// Many revealed bids behind several bidder pages: conservation is per-round,
+/// not per-page, so walking the index in pages must not change the outcome.
+#[test]
+fn many_bidders_across_multiple_pages_settle_conserving_escrow() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    // Escrows 100, 150, …, 400 → 1_750 committed. Bidder 3 bids its full escrow.
+    // Each bidder is funded with exactly its escrow, so its final balance is
+    // exactly what the round paid back to it.
+    let mut bidders = Vec::new(&f.env);
+    let mut nonces = Vec::new(&f.env);
+    let mut escrows = Vec::new(&f.env);
+    for i in 0..7u8 {
+        let escrow = 100 + i as i128 * 50;
+        let bidder = funded_bidder(&f, escrow);
+        let bid = if i == 3 { escrow } else { 10 + i as i128 };
+        nonces.push_back(commit_bid(&f, id, &bidder, bid, escrow, i + 1));
+        bidders.push_back(bidder);
+        escrows.push_back(escrow);
+    }
+    assert_conserved(&f, id, "after seven commits");
+
+    // Walk the bidder index in three pages; the pages must agree with the full
+    // list and report a stable total before anything is revealed.
+    let mut paged: Vec<Address> = Vec::new(&f.env);
+    let mut cursor: u32 = 0;
+    loop {
+        let page = f.client.get_bidders_page(&id, &cursor, &3);
+        assert_eq!(
+            page.total, 7,
+            "the reported total must not change between reads"
+        );
+        for i in 0..page.data.len() {
+            paged.push_back(page.data.get(i).unwrap());
+        }
+        if page.next_cursor == 0 {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    assert_eq!(paged.len(), 7);
+    for i in 0..7 {
+        assert_eq!(paged.get(i).unwrap(), bidders.get(i).unwrap());
+    }
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    // Four of seven reveal; the remaining three must be refunded in full.
+    for i in 0..4u32 {
+        let bid = if i == 3 {
+            escrows.get(i).unwrap()
+        } else {
+            10 + i as i128
+        };
+        f.client
+            .reveal(&id, &bidders.get(i).unwrap(), &bid, &nonces.get(i).unwrap());
+    }
+    assert_conserved(&f, id, "during a partial reveal over several pages");
+
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp = reveal_deadline + 1);
+    assert_eq!(
+        f.client.clear(&id),
+        Some(bidders.get(3).unwrap()),
+        "index 3 bid its full escrow"
+    );
+    assert_conserved(&f, id, "after clear");
+
+    f.client.settle(&id);
+    let settled = ledger(&f, id);
+    assert_eq!(
+        (
+            settled.committed,
+            settled.payout,
+            settled.refunds,
+            settled.locked
+        ),
+        (1_750, 250, 1_500, 0),
+        "payout plus every loser's escrow, nothing left locked",
+    );
+    assert_conserved(&f, id, "after settling a multi-page round");
+    assert_eq!(f.usdc_token.balance(&operator), 250);
+    for i in 0..7u32 {
+        let expected = if i == 3 { 0 } else { escrows.get(i).unwrap() };
+        assert_eq!(
+            f.usdc_token.balance(&bidders.get(i).unwrap()),
+            expected,
+            "bidder {i} was refunded exactly what it escrowed",
+        );
+    }
+    assert_eq!(f.usdc_token.balance(&f.client.address), 0);
+}
+
+// ── Conservation failures: mint, drop, double-pay ───────────────────────────
+
+#[test]
+fn settle_rejects_dropped_bidder_instead_of_stranding_escrow() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    let winner = funded_bidder(&f, 500);
+    let loser = funded_bidder(&f, 400);
+    let w_nonce = commit_bid(&f, id, &winner, 500, 500, 0x01);
+    commit_bid(&f, id, &loser, 400, 400, 0x02);
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    f.client.reveal(&id, &winner, &500, &w_nonce);
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp = reveal_deadline + 1);
+    assert_eq!(f.client.clear(&id), Some(winner.clone()));
+
+    // The loser's escrow is locked but their address left the index — settling
+    // the visible set would drop 400 USDC in the contract forever.
+    drop_bidder_from_index(&f, id, &loser);
+    assert_try_contract_err(f.client.try_settle(&id), Error::EscrowNotConserved);
+    assert_eq!(
+        f.usdc_token.balance(&operator),
+        0,
+        "no payout on a dropped escrow"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&loser),
+        0,
+        "the dropped escrow was not returned"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&f.client.address),
+        900,
+        "every escrow stays locked"
+    );
+    assert_eq!(
+        f.client.get_round(&id).status,
+        Status::Cleared,
+        "the settle did not land"
+    );
+}
+
+#[test]
+fn settle_rejects_double_pay_from_a_duplicated_bidder_index() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    let winner = funded_bidder(&f, 500);
+    let loser = funded_bidder(&f, 400);
+    let w_nonce = commit_bid(&f, id, &winner, 500, 500, 0x01);
+    commit_bid(&f, id, &loser, 400, 400, 0x02);
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    f.client.reveal(&id, &winner, &500, &w_nonce);
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp = reveal_deadline + 1);
+    f.client.clear(&id);
+
+    // The loser appears twice, so paying the index would refund 400 twice.
+    tamper_round(&f, id, |round| round.bidders.push_back(loser.clone()));
+    assert_try_contract_err(f.client.try_settle(&id), Error::EscrowNotConserved);
+    assert_eq!(
+        f.usdc_token.balance(&loser),
+        0,
+        "no refund and no double refund"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&operator),
+        0,
+        "no payout on a double-pay path"
+    );
+    assert_eq!(f.usdc_token.balance(&f.client.address), 900);
+}
+
+#[test]
+fn settle_rejects_mint_when_the_ledger_claims_more_escrow_than_bids_hold() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    let winner = funded_bidder(&f, 700);
+    let w_nonce = commit_bid(&f, id, &winner, 500, 700, 0x01);
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    f.client.reveal(&id, &winner, &500, &w_nonce);
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp = reveal_deadline + 1);
+    f.client.clear(&id);
+
+    // Claim 100 more escrow than any bid holds: the arithmetic identity still
+    // holds, but the locked balance is not backed by the bidder index.
+    f.env.as_contract(&f.client.address, || {
+        let mut l = try_get_ledger(&f.env, id).unwrap();
+        l.committed += 100;
+        l.locked += 100;
+        crate::storage::set_ledger(&f.env, id, &l);
+    });
+    assert_try_contract_err(f.client.try_settle(&id), Error::EscrowNotConserved);
+    assert_eq!(f.usdc_token.balance(&operator), 0);
+    assert_eq!(f.usdc_token.balance(&winner), 0, "winner surplus untouched");
+    assert_eq!(f.usdc_token.balance(&f.client.address), 700);
+}
+
+#[test]
+fn settle_rejects_bid_already_marked_settled() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    let winner = funded_bidder(&f, 1_000);
+    let loser = funded_bidder(&f, 1_000);
+    let w_nonce = commit_bid(&f, id, &winner, 500, 500, 0x01);
+    commit_bid(&f, id, &loser, 400, 400, 0x02);
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    f.client.reveal(&id, &winner, &500, &w_nonce);
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp = reveal_deadline + 1);
+    f.client.clear(&id);
+
+    // A payout that already ran would leave the loser marked settled with escrow
+    // still locked, so the settle must refuse rather than double-spend the round.
+    mark_settled(&f, id, &loser);
+    assert_try_contract_err(f.client.try_settle(&id), Error::EscrowNotConserved);
+    assert_eq!(
+        f.usdc_token.balance(&loser),
+        600,
+        "no refund through a settled flag"
+    );
+    assert_eq!(f.usdc_token.balance(&f.client.address), 900);
+}
+
+#[test]
+fn reveal_rejects_a_bidder_index_that_drifted_from_the_escrowed_set() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    let alice = funded_bidder(&f, 1_000);
+    let bob = funded_bidder(&f, 1_000);
+    let carol = funded_bidder(&f, 1_000);
+    let a_nonce = commit_bid(&f, id, &alice, 500, 500, 0x01);
+    let c_nonce = commit_bid(&f, id, &carol, 450, 450, 0x02);
+    commit_bid(&f, id, &bob, 400, 400, 0x03);
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    f.client.reveal(&id, &alice, &500, &a_nonce);
+    assert_conserved(&f, id, "before the index drifts");
+
+    // Drop an escrow-bearing bidder mid-reveal: the remaining reveal set no
+    // longer matches what escrow was taken against.
+    drop_bidder_from_index(&f, id, &bob);
+    assert_try_contract_err(
+        f.client.try_reveal(&id, &carol, &450, &c_nonce),
+        Error::EscrowNotConserved,
+    );
+    assert_eq!(
+        f.client.get_bid_state(&id, &carol).revealed_value,
+        None,
+        "a reveal against an unreconcilable round must not be recorded"
+    );
+    assert_eq!(f.client.get_round(&id).status, Status::Revealing);
+    assert_eq!(
+        f.usdc_token.balance(&f.client.address),
+        1_350,
+        "all escrow still locked"
+    );
+}
+
+#[test]
+fn reveal_rejects_a_phantom_bidder_in_the_index() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    let alice = funded_bidder(&f, 1_000);
+    let a_nonce = commit_bid(&f, id, &alice, 500, 500, 0x01);
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+
+    // An address with no escrowed bid cannot be revealed for, and its presence
+    // makes the round unaccountable for.
+    let phantom = funded_bidder(&f, 1_000);
+    tamper_round(&f, id, |round| round.bidders.push_back(phantom.clone()));
+    assert_try_contract_err(
+        f.client.try_reveal(&id, &alice, &500, &a_nonce),
+        Error::EscrowNotConserved,
+    );
+    assert_eq!(f.client.get_bid_state(&id, &alice).revealed_value, None);
+    assert_eq!(f.usdc_token.balance(&f.client.address), 500);
+}
+
+#[test]
+fn void_rejects_a_bidder_index_that_drifted_from_the_escrowed_set() {
+    let f = setup();
+    let operator = Address::generate(&f.env);
+    let id = open_round(&f, &operator);
+    let a = funded_bidder(&f, 1_000);
+    let b = funded_bidder(&f, 1_000);
+    commit_bid(&f, id, &a, 700, 700, 0x01);
+    commit_bid(&f, id, &b, 500, 500, 0x02);
+
+    // A bidder whose escrow is locked is missing from the index: refunding the
+    // visible set would strand their USDC, so the void is refused.
+    drop_bidder_from_index(&f, id, &b);
+    f.env.ledger().with_mut(|l| l.timestamp = 2_500 + 3_600 + 1);
+    assert_try_contract_err(f.client.try_void(&id), Error::EscrowNotConserved);
+    assert_eq!(
+        f.client.get_round(&id).status,
+        Status::Open,
+        "the void did not land"
+    );
+    assert_eq!(
+        f.usdc_token.balance(&a),
+        300,
+        "no partial refund through a refused void"
+    );
+    assert_eq!(f.usdc_token.balance(&b), 500);
+    assert_eq!(
+        f.usdc_token.balance(&f.client.address),
+        1_200,
+        "every escrow stays locked"
+    );
+}
+
+#[test]
+fn settle_works_again_after_the_index_is_restored() {
+    let (f, t_reveal, commit_deadline, reveal_deadline) = setup_drand();
+    let operator = Address::generate(&f.env);
+    let id = drand_round(
+        &f,
+        &operator,
+        commit_deadline,
+        reveal_deadline,
+        ClearingRule::HighestBid,
+    );
+
+    let winner = funded_bidder(&f, 500);
+    let loser = funded_bidder(&f, 400);
+    let w_nonce = commit_bid(&f, id, &winner, 500, 500, 0x01);
+    commit_bid(&f, id, &loser, 400, 400, 0x02);
+
+    f.env.ledger().with_mut(|l| l.timestamp = t_reveal + 1);
+    f.client.open_reveal(&id, &real_sig(&f.env));
+    f.client.reveal(&id, &winner, &500, &w_nonce);
+    f.env
+        .ledger()
+        .with_mut(|l| l.timestamp = reveal_deadline + 1);
+    f.client.clear(&id);
+
+    drop_bidder_from_index(&f, id, &loser);
+    assert_try_contract_err(f.client.try_settle(&id), Error::EscrowNotConserved);
+    tamper_round(&f, id, |round| round.bidders.push_back(loser.clone()));
+    f.client.settle(&id);
+
+    assert_conserved(&f, id, "after settling a repaired round");
+    assert_eq!(f.usdc_token.balance(&operator), 500);
+    assert_eq!(f.usdc_token.balance(&winner), 0);
+    assert_eq!(
+        f.usdc_token.balance(&loser),
+        400,
+        "the repaired index refunds the loser"
+    );
+    assert_eq!(f.usdc_token.balance(&f.client.address), 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ISSUE #160 — ERROR CODE DOCUMENTATION CONSISTENCY
 //
 // These tests make sure contracts/round/ERRORS.md never drifts away from the
@@ -1534,7 +2283,8 @@ pub(super) const DOCUMENTED_ERROR_CODES: &[(Error, u32)] = &[
     (Error::NoValidBids, 37),
     (Error::RoundFull, 38),
     (Error::InvalidLimit, 39),
-    (Error::InvalidCursor, 40),
+    // ── 40–49: escrow accounting ──
+    (Error::EscrowNotConserved, 40),
 ];
 
 /// Convert an `Error` to its on-chain discriminant using the [`repr(u32)`]
@@ -1573,7 +2323,7 @@ pub(super) fn variant_name(e: Error) -> &'static str {
         Error::NoValidBids => "NoValidBids",
         Error::RoundFull => "RoundFull",
         Error::InvalidLimit => "InvalidLimit",
-        Error::InvalidCursor => "InvalidCursor",
+        Error::EscrowNotConserved => "EscrowNotConserved",
     }
 }
 
@@ -1633,12 +2383,13 @@ fn error_codes_use_reserved_ranges() {
     // Range policy enforced by the documentation:
     //   1–4     → initialization/lookup
     //   10–22   → lifecycle/timing
-    //   30–40   → crypto/validation
+    //   30–39   → crypto/validation
+    //   40–49   → escrow accounting
     // New categories should pick a fresh, contiguous range — not collide with
     // logging conventions — and update ERRORS.md at the same time.
     for (variant, code) in DOCUMENTED_ERROR_CODES {
         let name = variant_name(*variant);
-        let in_range = matches!(*code, 1..=4 | 10..=22 | 30..=40);
+        let in_range = matches!(*code, 1..=4 | 10..=22 | 30..=39 | 40..=49);
         assert!(
             in_range,
             "{name} = {code} falls outside the documented code ranges; \

@@ -2,7 +2,146 @@ import { normalizeError } from "@sub-rosa/logging/errors";
 // Copyright (c) 2026 Sub Rosa contributors
 import { createLogger } from '@sub-rosa/logging';
 const diagnostics = createLogger("services.keeper.src.queue");
-import { KeeperStore, normalizeRoundId, parseLeaseMs } from "./store.js";
+import {
+  KeeperStore,
+  normalizeRoundId,
+  compareRoundIds,
+  type RoundIdInput,
+  type WatchedRound,
+} from "./store.js";
+
+export { normalizeRoundId, type RoundIdInput, type WatchedRound };
+
+export interface KeeperQueueOptions {
+  contractId?: string;
+  network?: string;
+}
+
+/**
+ * KeeperQueue manages the active pipeline of rounds for the watch loop,
+ * ensuring strict state separation between queued and in-flight rounds,
+ * and reliable persistence handoff during shutdown and restart.
+ */
+export class KeeperQueue {
+  private readonly store: KeeperStore;
+  private readonly options: KeeperQueueOptions;
+  private queuedRoundIds: Set<string> = new Set();
+  private inFlightRoundIds: Set<string> = new Set();
+  private stopping = false;
+
+  constructor(store: KeeperStore, options: KeeperQueueOptions = {}) {
+    this.store = store;
+    this.options = options;
+    this.syncWithStore();
+  }
+
+  public syncWithStore(): void {
+    const rounds = this.store.listRounds();
+    for (const r of rounds) {
+      if (this.options.contractId && r.contractId && r.contractId !== this.options.contractId) continue;
+      if (this.options.network && r.network && r.network !== this.options.network) continue;
+      if (r.lastStatus === "Settled" || r.lastStatus === "Voided") continue;
+      // Do not re-queue a round that is currently in-flight
+      if (!this.inFlightRoundIds.has(r.roundId)) {
+        this.queuedRoundIds.add(r.roundId);
+      }
+    }
+  }
+
+  public enqueue(roundId: RoundIdInput, extra: Partial<WatchedRound> = {}): WatchedRound {
+    const id = normalizeRoundId(roundId);
+    this.store.addRound(id, {
+      ...extra,
+      queueStatus: this.inFlightRoundIds.has(id) ? "in-flight" : "queued",
+    });
+    const round = this.store.getRound(id)!;
+    if (round.lastStatus !== "Settled" && round.lastStatus !== "Voided") {
+      if (!this.inFlightRoundIds.has(id)) {
+        this.queuedRoundIds.add(id);
+      }
+    }
+    return round;
+  }
+
+  public claim(): WatchedRound | undefined {
+    if (this.stopping) return undefined;
+    for (const id of this.queuedRoundIds) {
+      this.queuedRoundIds.delete(id);
+      this.inFlightRoundIds.add(id);
+      this.store.updateRound(id, { queueStatus: "in-flight" });
+      return this.store.getRound(id);
+    }
+    return undefined;
+  }
+
+  public complete(roundId: RoundIdInput, update: Partial<WatchedRound> = {}): void {
+    const id = normalizeRoundId(roundId);
+    this.inFlightRoundIds.delete(id);
+    const isTerminal = update.lastStatus === "Settled" || update.lastStatus === "Voided";
+    this.store.updateRound(id, {
+      ...update,
+      queueStatus: isTerminal ? "terminal" : (this.stopping ? undefined : "queued"),
+    });
+    const round = this.store.getRound(id);
+    if (round && !isTerminal) {
+      if (!this.stopping) {
+        this.queuedRoundIds.add(id);
+      }
+    }
+  }
+
+  public release(roundId: RoundIdInput, update: Partial<WatchedRound> = {}): void {
+    const id = normalizeRoundId(roundId);
+    this.inFlightRoundIds.delete(id);
+    const isTerminal = update.lastStatus === "Settled" || update.lastStatus === "Voided";
+    this.store.updateRound(id, {
+      ...update,
+      queueStatus: isTerminal ? "terminal" : "queued",
+    });
+    const round = this.store.getRound(id);
+    if (round && !isTerminal) {
+      this.queuedRoundIds.add(id);
+    }
+  }
+
+  public isQueued(roundId: RoundIdInput): boolean {
+    return this.queuedRoundIds.has(normalizeRoundId(roundId));
+  }
+
+  public isInFlight(roundId: RoundIdInput): boolean {
+    return this.inFlightRoundIds.has(normalizeRoundId(roundId));
+  }
+
+  public getQueuedRounds(): WatchedRound[] {
+    return [...this.queuedRoundIds]
+      .map((id) => this.store.getRound(id))
+      .filter((r): r is WatchedRound => r !== undefined)
+      .sort((a, b) => compareRoundIds(a.roundId, b.roundId));
+  }
+
+  public getInFlightRounds(): WatchedRound[] {
+    return [...this.inFlightRoundIds]
+      .map((id) => this.store.getRound(id))
+      .filter((r): r is WatchedRound => r !== undefined)
+      .sort((a, b) => compareRoundIds(a.roundId, b.roundId));
+  }
+
+  public stop(): void {
+    this.stopping = true;
+  }
+
+  public isStopping(): boolean {
+    return this.stopping;
+  }
+
+  public size(): number {
+    return this.queuedRoundIds.size;
+  }
+
+  public inFlightCount(): number {
+    return this.inFlightRoundIds.size;
+  }
+}
 
 function usage() {
   diagnostics.info("usage-npm-run-queue-command-args-commands-add-roundid-a", `
@@ -37,7 +176,10 @@ function main() {
       usage();
     }
     const roundId = normalizeRoundId(rawRoundId);
-    store.addRound(roundId, { contractId, network });
+    const contractId = process.env.ROUND_CONTRACT_ID;
+    const network = process.env.NETWORK_PASSPHRASE;
+    const queue = new KeeperQueue(store, { contractId, network });
+    queue.enqueue(roundId, { contractId, network });
     diagnostics.info("added-round", `Added round ${roundId} to the queue.`);
   } else if (cmd === "list") {
     const rounds = store.listRounds();
@@ -105,9 +247,20 @@ function main() {
   }
 }
 
-try {
-  main();
-} catch (error) {
-  diagnostics.error("error", `Error: ${normalizeError(error).message}`);
-  process.exit(1);
+const isCli =
+  typeof process !== "undefined" &&
+  Boolean(
+    process.argv[1] &&
+      (process.argv[1].endsWith("queue.ts") ||
+        process.argv[1].endsWith("queue.js") ||
+        process.argv[1].endsWith("queue")),
+  );
+
+if (isCli) {
+  try {
+    main();
+  } catch (error) {
+    diagnostics.error("error", `Error: ${normalizeError(error).message}`);
+    process.exit(1);
+  }
 }

@@ -27,7 +27,8 @@ stay in sync with `contracts/round/src/types.rs`.
 | --- | --- |
 | 1–4     | Initialization & state lookup |
 | 10–22   | Lifecycle & timing |
-| 30–40   | Cryptography & validation |
+| 30–39   | Cryptography & validation |
+| 40–49   | Escrow accounting |
 
 ## Initialization & state lookup (1–4)
 
@@ -74,38 +75,21 @@ stay in sync with `contracts/round/src/types.rs`.
 | 41 | `SealRoundTooLate` | `commit` | `seal_round > round.reveal_round`: the seal names a Drand round after the one the auction committed to open. | The sealed bid is locked to the wrong Drand round. | Reseal the bid to the round published in the `created` event (`reveal_round`) and commit again; no escrow was moved. |
 | 42 | `InvalidSealRoundZero` | `create_round`, `commit` | `reveal_round == 0` at round creation, or `seal_round == 0` at commit. A zero or overflowing round can never be published by the Drand chain. | The Drand round number is malformed. | Use a positive round the quicknet chain can actually publish (`genesis + period × R` must fit in `u64`); check before locking escrow. |
 
-| 40 | `InvalidCursor` | `get_bidders_page` | Cursor has the wrong length, version, checksum, scope, or bounds. | The bidder cursor is invalid for this round and contract. | Restart with no cursor; pass each returned token unchanged. |
+## Escrow accounting (40–49)
 
-## Bidder cursor encoding (v1)
+Escrow conservation is one predicate, enforced by `reveal`, `clear`, `void`,
+and `settle`: committed escrow equals the settled payout plus refunds plus the
+balance still locked, and every locked dollar is backed by an unsettled bid in
+the round's bidder index.
 
-`get_bidders_page(round_id, cursor, limit)` takes `Option<Bytes>`: `None`
-starts an enumeration. Pass the returned `next_cursor` unchanged while
-`has_more` is true. The terminal page has `has_more = false` and
-`next_cursor = None`; an empty round returns an empty terminal page.
-Limits remain 1–100 (`InvalidLimit`, code 39).
+| Code | Variant | Raised by | Trigger | User-facing message | Suggested next action |
+| ---: | --- | --- | --- | --- | --- |
+| 40 | `EscrowNotConserved` | `reveal`, `clear`, `settle`, `void` | The round's escrow ledger does not satisfy `committed == payout + refunds + locked`; or the escrow it reports locked is not matched by indexed, unsettled bids; or a planned payout plus refunds would not drain exactly the locked balance. Concretely: a bidder index that drifted from the escrowed set (dropped, duplicated, or phantom bidder), a payout above the winner's escrow, a bid already marked settled, or a locked balance that survives a terminal round. | The round's escrow cannot be reconciled with the bids it was taken against, so no funds were moved. | Do not retry — the round's state is inconsistent. Export a receipt (`exportReceipt` / `getRound` + `getBidState` per bidder) and compare the bidder index against the escrowed set. If the index is intact, re-simulate from a fresh ledger view before escalating. |
 
-The 41-byte token contains version `0x01`, next unread zero-based offset
-(4 bytes, big endian), snapshot bidder count (4 bytes, big endian), then a
-32-byte SHA-256 checksum. The checksum preimage is the canonical Soroban XDR
-`ScVal` tuple `(current_contract_address, round_id: u64, header: Bytes)`,
-where `header` is the first nine bytes. This binds the token to its contract,
-round, offset, and count. Invalid tokens return `InvalidCursor` (40), rather
-than silently clamping an offset. Continuation offsets must be positive and
-at most the snapshot count, which must not exceed the current bidder count.
-
-The bidder index is append-only, ordered by first commit; overwriting a bid
-does not add another index entry. The first page fixes the count. Later
-commits are excluded from that enumeration; restart to include them. Cursors
-are deterministic and replayable for the same snapshot. The checksum detects
-corruption and foreign scope; it is public, not an authentication mechanism
-or a claim that a caller has read earlier pages. This changes the pagination
-ABI from numeric offsets; deploy matching contract and generated bindings
-together. Existing deployed contracts require their previous SDK version.
-
-The SDK iterator follows `has_more`, checks stable counts and forward progress,
-and rejects repeated bidder IDs before yielding the affected page with
-`SubRosaPaginationError` (`reason = "repeated_bidder"`). Contract and SDK tests
-consume the same ordered addresses in `fixtures/bidder-pagination.txt`.
+Because the check runs before and after the transfers inside a single
+invocation, a rejection reverts every transfer the call had already made: a
+settle that fails conservation cannot mint, drop, or double-pay escrow even
+partially.
 
 ## How to use this table
 

@@ -39,3 +39,56 @@ cached for later calls. A mismatch throws `SubRosaNetworkMismatchError` before
 simulation, signing, or submission, with the conflicting values and a suggested
 fix. Contract IDs do not encode a Stellar network, so copying a `C...` address
 between Testnet and Mainnet requires updating all three configuration values.
+
+## Mainnet readiness (manifest-pinned)
+
+`packages/sdk/mainnet-artifacts.json` is the artifact manifest the repo commits.
+`mainnet:ready` and `mainnet:verify` both load it and compare the live deployment
+against it through the read-only client:
+
+| manifest field   | compared against                                             |
+| ---------------- | ------------------------------------------------------------ |
+| `contractId`     | the contract the client is bound to                          |
+| `networkPassphrase` | the passphrase the RPC reports (`getNetwork`)             |
+| `wasmHash`       | the executable hash read from the contract ledger entry      |
+| `tokenContract`  | `usdc` in the deployed `GlobalConfig` (the escrow SAC)        |
+
+Any disagreement blocks, and a field that cannot be read at all blocks too — an
+unverifiable field must never read as a pass. The report names the field and
+prints a redacted value: passphrases become a short sha256 fingerprint, and
+anything shaped like an `S...` secret key is redacted outright. The configured
+passphrase and contract id are compared with the manifest before any RPC call,
+so pointing `NETWORK_PASSPHRASE` at testnet fails instead of reporting a green
+check against the wrong network.
+
+```ts
+import {
+  assertDeploymentMatches,
+  defaultMainnetReadinessInput,
+  readLiveDeployment,
+  runMainnetReadiness,
+} from "@sub-rosa/sdk";
+
+// Live: throws SubRosaDeploymentMismatchError naming every disagreeing field.
+assertDeploymentMatches(manifest, await readLiveDeployment(client, server, contractId, fetchHash));
+
+// Full report, or a replay of a recorded snapshot with no RPC at all:
+const report = await runMainnetReadiness(
+  defaultMainnetReadinessInput({ fixture: recordedSnapshot }),
+);
+```
+
+Readiness never needs a secret key: the client is read-only and balance checks
+take public keys (`OPERATOR_PUBLIC_KEY`, `KEEPER_PUBLIC_KEY`, `BIDDER_PUBLIC_KEY`).
+
+## Commands
+
+```bash
+pnpm mainnet:ready -- --strict                                      # live, read-only
+pnpm mainnet:ready -- --fixture packages/sdk/fixtures/mainnet-readiness.json  # CI-safe
+pnpm mainnet:verify                                                 # settlement proof + manifest
+```
+
+`--fixture` replays a recorded deployment through the same comparison with no
+mainnet RPC, so CI can prove each mismatch field fails and a matching recording
+passes.

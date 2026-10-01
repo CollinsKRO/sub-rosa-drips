@@ -27,30 +27,62 @@ export {
   type TransactionSubmitter,
 } from "./submitter.js";
 export {
+  ROUND_CONTRACT_ERRORS,
+  ROUND_CONTRACT_ERRORS_BY_NAME,
+  getRoundContractError,
+  isRoundContractErrorRetryable,
+  diffContractErrorMapping,
   SubRosaClientConfigError,
-  SubRosaPaginationError,
+  SubRosaDeploymentMismatchError,
+  SubRosaManifestError,
   SubRosaMissingReturnValueError,
   SubRosaNetworkMismatchError,
   SubRosaPreflightError,
+  SubRosaSessionMismatchError,
   SubRosaSubmitError,
   SubRosaTimeoutError,
   SubRosaTransactionError,
   SubRosaAssetValidationError,
 } from "./errors.js";
 export type {
+  DeploymentMismatchErrorParams,
+  ManifestErrorParams,
   NetworkMismatchErrorParams,
+  NetworkMismatchReason,
   PreflightFailureKind,
   SubRosaPreflightErrorParams,
   TimeoutErrorParams,
 } from "./errors.js";
+
+// Escrow conservation: the off-chain mirror of the contract's
+// EscrowNotConserved guard (issue #374).
+export {
+  ESCROW_MAX_BIDDERS,
+  ESCROW_PAGE_SIZE,
+  evaluateEscrowConservation,
+  isEscrowConserved,
+  proveEscrowConservationFromPages,
+  type EscrowConservationIssue,
+  type EscrowConservationIssueCode,
+  type EscrowConservationPhase,
+  type EscrowConservationReport,
+  type EscrowConservationSource,
+  type EscrowConservationTotals,
+  type ProveEscrowConservationOptions,
+} from "./conservation.js";
 export {
   validateContractNetwork,
+  validatePasskeySession,
   type ContractNetworkValidationConfig,
   type NetworkValidationServer,
+  type PasskeySessionBinding,
+  type SessionBindingTarget,
 } from "./network.js";
 
 export {
   validateEncryptedBlob,
+  validateSealedBid,
+  assertSealedBid,
   tryDecodeHex,
   tryDecodeBase64,
   MAX_CIPHERTEXT_BYTES,
@@ -58,13 +90,23 @@ export {
   type BlobContentType,
   type BlobValidationIssue,
   type BlobValidationResult,
+  type SealedBidBinding,
 } from "./encrypted-blob.js";
 export {
+  DEPLOYMENT_CHECK_IDS,
+  DEPLOYMENT_FIELDS,
+  DEPLOYMENT_FIELD_LABELS,
   MAINNET_ARTIFACTS,
   MAINNET_CONFIRM_PHRASE,
   MAINNET_DEPLOY_MIN_XLM_STROOPS,
+  MAINNET_MANIFEST,
+  MAINNET_MANIFEST_PATH,
   MAINNET_MICRO_MAX_ESCROW,
   MAINNET_MIN_FEE_RESERVE_STROOPS,
+  MAINNET_XLM_SAC_ID,
+  parseMainnetManifest,
+  type DeploymentField,
+  type MainnetManifest,
 } from "./mainnet-artifacts.js";
 export {
   AssetConfigError,
@@ -75,21 +117,36 @@ export {
   type AssetType,
 } from "./asset-config.js";
 export {
+  assertDeploymentMatches,
   assertMainnetConfirmed,
   assertMicroAmounts,
   assertReadinessForExecute,
+  compareDeployment,
   createSacBalanceReader,
   defaultMainnetReadinessInput,
+  deploymentChecks,
   fetchContractWasmHash,
+  fixtureDeployment,
+  fixtureReader,
   formatReadinessReport,
   hasBlockingFailures,
   nativeXlmSacId,
+  parseMainnetReadinessFixture,
+  readLiveDeployment,
   runMainnetReadiness,
+  summarizeDeploymentValue,
   verifySettledRoundProof,
+  type DeploymentComparison,
+  type DeploymentFieldComparison,
+  type MainnetFixtureBid,
+  type MainnetFixtureRound,
+  type MainnetLiveDeployment,
   type MainnetReadinessDeps,
+  type MainnetReadinessFixture,
   type MainnetReadinessInput,
   type MainnetReadinessReport,
   type ReadinessCheck,
+  type ReadinessReader,
   type ReadinessStatus,
 } from "./mainnet-readiness.js";
 
@@ -154,6 +211,8 @@ export {
   type KeeperStatusResponse,
   type KeeperHealthResponse,
   type ApiError,
+  type DashboardPhase,
+  type DashboardSnapshot,
 } from "./status.js";
 
 // Fetch client for the keeper status API.
@@ -161,6 +220,10 @@ export {
   KeeperStatusClient,
   StatusApiError,
   StatusJsonParseError,
+  KeeperStatusTimeoutError,
+  redactUrlUserinfo,
+  type KeeperReadiness,
+  type KeeperNotReadyReason,
   type StatusClientOptions,
   fetchKeeperStatus,
 } from "./status-client.js";

@@ -202,8 +202,9 @@ test("JSON mode: invalid receipt includes error codes in errors array", () => {
   const result = verifyReceipt(receipt);
   const out = buildJsonOutput(receipt, result, null);
   assert.equal(out.valid, false);
-  assert.equal(typeof out.receiptId, "string");
-  assert.equal(out.roundId, receipt.roundId);
+  // Fail closed: an invalid receipt must not expose a receipt identity.
+  assert.equal(out.receiptId, null);
+  assert.equal(out.roundId, null);
   assert.ok(out.errors.some((e) => e.code === "winner_mismatch"));
   assert.equal(out.warnings.length, 0);
 });
@@ -217,7 +218,10 @@ test("JSON mode: event errors surface in the errors array", () => {
 });
 
 test("JSON mode: malformed input produces parse_error with null ids", () => {
-  const out = buildJsonOutput(null, null, "SyntaxError: Unexpected token < in JSON");
+  const out = buildJsonOutput(null, null, {
+    code: "parse_error",
+    message: "SyntaxError: Unexpected token < in JSON",
+  });
   assert.equal(out.valid, false);
   assert.equal(out.receiptId, null);
   assert.equal(out.roundId, null);

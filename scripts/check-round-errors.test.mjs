@@ -6,16 +6,18 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
+import { fileURLToPath } from "node:url";
+
 import {
   diffVariants,
   parseErrorsMd,
+  parseSdkErrors,
   parseTypesRs,
 } from "./check-round-errors.mjs";
 
-const SCRIPT_PATH = fileURLToPath(new URL(
-  "check-round-errors.mjs",
-  import.meta.url,
-));
+const SCRIPT_PATH = fileURLToPath(
+  new URL("check-round-errors.mjs", import.meta.url),
+);
 const PROJECT_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 function runScript(args = [], options = {}) {
@@ -69,12 +71,28 @@ describe("parseErrorsMd", () => {
   });
 });
 
+describe("parseSdkErrors", () => {
+  it("reads every variant from the real packages/sdk/src/errors.ts", () => {
+    const content = readFileSync(
+      join(PROJECT_ROOT, "packages/sdk/src/errors.ts"),
+      "utf-8",
+    );
+    const variants = parseSdkErrors(content);
+    assert.equal(variants.length, 27);
+    assert.deepEqual(
+      variants.find((v) => v.name === "InvalidLimit"),
+      { name: "InvalidLimit", code: 39 },
+    );
+  });
+});
+
 describe("check-round-errors script", () => {
   it("passes against the real repo sources", () => {
     const result = runScript();
-    assert.match(result, /PASS\s+types\.rs and ERRORS\.md list the same error codes\./);
-    assert.match(result, /types\.rs : 28 variants/);
-    assert.match(result, /ERRORS\.md: 28 rows/);
+    assert.match(result, /PASS\s+types\.rs, ERRORS\.md, and SDK list the same error codes\./);
+    assert.match(result, /types\.rs : 27 variants/);
+    assert.match(result, /ERRORS\.md: 27 rows/);
+    assert.match(result, /SDK errors: 27 variants/);
   });
 
   it("fails when ERRORS.md is missing a variant", () => {

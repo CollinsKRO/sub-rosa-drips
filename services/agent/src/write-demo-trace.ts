@@ -1,1 +1,94 @@
-Ly8gQ29weXJpZ2h0IChjKSAyMDI2IFN1YiBSb3NhIGNvbnRyaWJ1dG9ycwppbXBvcnQgeyBjcmVhdGVMb2dnZXIsIHR5cGUgTG9nZ2VyIH0gZnJvbSAnQHN1Yi1yb3NhL2xvZ2dpbmcnOwpjb25zdCBkaWFnbm9zdGljcyA9IGNyZWF0ZUxvZ2dlcigic2VydmljZXMuYWdlbnQuc3JjLndyaXRlLWRlbW8tdHJhY2UiKTsKaW1wb3J0IHsgbWtkaXIsIHdyaXRlRmlsZSB9IGZyb20gIm5vZGU6ZnMvcHJvbWlzZXMiOwppbXBvcnQgeyBkaXJuYW1lLCByZXNvbHZlIH0gZnJvbSAibm9kZTpwYXRoIjsKCmV4cG9ydCBpbnRlcmZhY2UgRGVtb1RyYWNlUGF5bG9hZCB7CiAgbWV0YTogewogICAgdGl0bGU6IHN0cmluZzsKICAgIG5ldHdvcms6IHN0cmluZzsKICAgIGNvbnRyYWN0SWQ6IHN0cmluZzsKICAgIHJvdW5kSWQ6IG51bWJlcjsKICAgIHJldmVhbFJvdW5kOiBudW1iZXI7CiAgICBjbGVhcmluZ1J1bGU6ICJIaWdoZXN0QmlkIiB8ICJMb3dlc3RCaWQiOwogICAgcmVjb3JkZWRBdDogc3RyaW5nOwogICAgcm91bmRTdGF0dXM6IHN0cmluZzsKICAgIGxpdmVFMmU6IHN0cmluZ1tdOwogICAgcHJvb2ZTY29wZTogc3RyaW5nOwogIH07CiAgbGlmZWN5Y2xlOiBBcnJheTx7CiAgICBwaGFzZTogc3RyaW5nOwogICAgbGFiZWw6IHN0cmluZzsKICAgIGRldGFpbDogc3RyaW5nOwogICAgc3RhdHVzOiAiZG9uZSIgfCAiYWN0aXZlIiB8ICJwZW5kaW5nIjsKICB9PjsKICBiaWRkZXJzOiBBcnJheTx7CiAgICBsYWJlbDogc3RyaW5nOwogICAgYWRkcmVzczogc3RyaW5nOwogICAgcm9sZTogImFnZW50IiB8ICJodW1hbiI7CiAgICBlc2Nyb3dVc2RjOiBudW1iZXI7CiAgICBiaWRVc2RjOiBudW1iZXIgfCBudWxsOwogICAgcmV2ZWFsZWQ6IGJvb2xlYW47CiAgICB2YWxpZDogYm9vbGVhbjsKICAgIHdpbm5lcjogYm9vbGVhbjsKICB9PjsKICBhZ2VudHM6IEFycmF5PHsKICAgIG5hbWU6IHN0cmluZzsKICAgIHByaW5jaXBhbDogc3RyaW5nOwogICAgc2Vzc2lvbktleTogc3RyaW5nOwogICAgbWFuZGF0ZTogewogICAgICBtYXhCaWRVc2RjOiBudW1iZXI7CiAgICAgIG1heEVzY3Jvd1VzZGM6IG51bWJlcjsKICAgICAgbWF4QXBwcmFpc2FsU3BlbmRVc2RjOiBudW1iZXI7CiAgICAgIGNhcHBlZEF0TWF4QmlkOiBib29sZWFuOwogICAgfTsKICAgIGFwcHJhaXNhbDogewogICAgICBmYWlyVmFsdWU6IG51bWJlcjsKICAgICAgc3VnZ2VzdGVkTWF4QmlkOiBudW1iZXI7CiAgICAgIGlucHV0c0hhc2g6IHN0cmluZzsKICAgIH07CiAgICB4NDAyOiB7IHByaWNlVXNkYzogbnVtYmVyOyBzZXR0bGVkOiBib29sZWFuIH07CiAgICBjb21taXRUeD86IHN0cmluZzsKICB9PjsKICBrZWVwZXI6IHsKICAgIGRyYW5kUm91bmQ6IG51bWJlcjsKICAgIGJsc1ZlcmlmaWVkT25DaGFpbjogYm9vbGVhbjsKICAgIHJldmVhbHM6IHN0cmluZ1tdOwogICAgY2xlYXJXaW5uZXI/OiBzdHJpbmc7CiAgICBjb250cmFjdEJhbGFuY2VGaW5hbDogbnVtYmVyOwogIH07CiAgc2V0dGxlbWVudDogewogICAgb3BlcmF0b3JSZWNlaXZlZFVzZGM6IG51bWJlcjsKICAgIHJlZnVuZHNVc2RjOiBudW1iZXI7CiAgICBub3RlOiBzdHJpbmc7CiAgfTsKICBhdWRpdG9yOiB7CiAgICBzb3VyY2U6IHN0cmluZzsKICAgIGdlbmVyYXRlZEF0OiBzdHJpbmc7CiAgICBzZWNyZXRIZXg6IHN0cmluZzsKICAgIHB1YmxpY0hleDogc3RyaW5nOwogICAgYmxvYnM6IFJlY29yZDxzdHJpbmcsIHN0cmluZz47CiAgfTsKfQoKY29uc3QgcmVwb1BhdGggPSAocGF0aDogc3RyaW5nKSA9PgogIHBhdGguc3RhcnRzV2l0aCgiLyIpID8gcGF0aCA6IHJlc29sdmUocHJvY2Vzcy5jd2QoKSwgIi4uLy4uIiwgcGF0aCk7CgpleHBvcnQgY2xhc3MgRGVtb1RyYWNlU2hhcGVFcnJvciBleHRlbmRzIEVycm9yIHsKICBjb25zdHJ1Y3RvcihyZWFkb25seSBpc3N1ZXM6IHN0cmluZ1tdKSB7CiAgICBzdXBlcihgSW52YWxpZCBkZW1vIHRyYWNlIHNoYXBlOlxuJHtpc3N1ZXMubWFwKChpKSA9PiBgLSAke2l9YCkuam9pbigiXG4iKX1gKTsKICAgIHRoaXMubmFtZSA9ICJEZW1vVHJhY2VTaGFwZUVycm9yIjsKICB9Cn0KCi8qKgogKiBWYWxpZGF0ZSB0aGUgY2Fub25pY2FsIGRlbW8gdHJhY2Ugc2hhcGUgYmVmb3JlIHdyaXRpbmcgaXQgdG8gZGlzay4KICogVGhlIHRyYWNlIG11c3QgY29udGFpbiBvbmUgb3JkZXJlZCBsaWZlY3ljbGUgdGhhdCBlbmRzIGluIGEgc2luZ2xlIHNldHRsZSwKICogYW5kIGV2ZXJ5IGJpZGRlciBtdXN0IGFwcGVhciBleGFjdGx5IG9uY2Ugd2l0aCBhIGNvbW1pdCBoYXNoIGFuZCBhCiAqIHJldmVhbCByZXN1bHQuCiAqLwpleHBvcnQgZnVuY3Rpb24gYXNzZXJ0Q2Fub25pY2FsRGVtb1RyYWNlKHRyYWNlOiBEZW1vVHJhY2VQYXlsb2FkKTogdm9pZCB7CiAgY29uc3QgaXNzdWVzOiBzdHJpbmdbXSA9IFtdOwoKICAvLyAxLiBCaWRkZXJzIG11c3QgYmUgcHJlc2VudCwgdW5pcXVlIGJ5IGxhYmVsLCBhbmQgZWFjaCBtdXN0IGhhdmUgYSBjb21taXQKICAvLyAgICBoYXNoIGFuZCBhIHJldmVhbCByZXN1bHQuCiAgY29uc3QgbGFiZWxzID0gdHJhY2UuYmlkZGVycy5tYXAoKGIpID0+IGIubGFiZWwpOwogIGNvbnN0IHNlZW4gPSBuZXcgU2V0PHN0cmluZz4oKTsKICBjb25zdCBkdXBsaWNhdGVzID0gbmV3IFNldDxzdHJpbmc+KCk7CiAgZm9yIChjb25zdCBsYWJlbCBvZiBsYWJlbHMpIHsKICAgIGlmIChzZWVuLmhhcyhsYWJlbCkpIGR1cGxpY2F0ZXMuYWRkKGxhYmVsKTsKICAgIHNlZW4uYWRkKGxhYmVsKTsKICB9CiAgaWYgKGR1cGxpY2F0ZXMuc2l6ZSA+IDApIHsKICAgIGlzc3Vlcy5wdXNoKGBiaWRkZXJzIGNvbnRhaW5zIGR1cGxpY2F0ZSBsYWJlbHM6ICR7Wy4uLmR1cGxpY2F0ZXNdLmpvaW4oIiwgIil9YCk7CiAgfQoKICBjb25zdCBhZ2VudE5hbWVzID0gbmV3IFNldCh0cmFjZS5hZ2VudHMubWFwKChhKSA9PiBhLm5hbWUpKTsKICBmb3IgKGNvbnN0IGxhYmVsIG9mIGxhYmVscykgewogICAgaWYgKCFhZ2VudE5hbWVzLmhhcyhsYWJlbCkpIHsKICAgICAgaXNzdWVzLnB1c2goYGJpZGRlciAiJHtsYWJlbH0iIGhhcyBubyBtYXRjaGluZyBhZ2VudCByZWNvcmRgKTsKICAgIH0KICB9CiAgZm9yIChjb25zdCBhZ2VudCBvZiB0cmFjZS5hZ2VudHMpIHsKICAgIGlmICghbGFiZWxzLmluY2x1ZGVzKGFnZW50Lm5hbWUpKSB7CiAgICAgIGlzc3Vlcy5wdXNoKGBhZ2VudCAiJHthZ2VudC5uYW1lfSIgaGFzIG5vIG1hdGNoaW5nIGJpZGRlciByZWNvcmRgKTsKICAgIH0KICAgIGlmICghYWdlbnQuY29tbWl0VHggfHwgYWdlbnQuY29tbWl0VHgu dHJpbSgpID09PSAiIikgewogICAgICBpc3N1ZXMucHVzaChgYWdlbnQgIiR7YWdlbnQubmFtZX0iIGlzIG1pc3NpbmcgYSBjb21taXQgaGFzaGApOwogICAgfQogIH0KCiAgLy8gMi4gUmV2ZWFsIHJlc3VsdHMgY292ZXIgZXZlcnkgYmlkZGVyIGV4YWN0bHkgb25jZS4KICBjb25zdCByZXZlYWxzID0gdHJhY2Uua2VlcGVyLnJldmVhbHM7CiAgY29uc3QgcmV2ZWFsU2V0ID0gbmV3IFNldChyZXZlYWxzKTsKICBpZiAocmV2ZWFsU2V0LnNpemUgIT09IHJldmVhbHMubGVuZ3RoKSB7CiAgICBpc3N1ZXMucHVzaCgiY29ob3J0IHJldmVhbHMgY29udGFpbiBkdXBsaWNhdGUgZW50cmllcyIpOwogIH0KICBmb3IgKGNvbnN0IGxhYmVsIG9mIGxhYmVscykgewogICAgaWYgKCFyZXZlYWxTZXQuaGFzKGxhYmVsKSkgewogICAgICBpc3N1ZXMucHVzaChgY29ob3J0IHJldmVhbHMgb21pdCBiaWRkZXIgIiR7bGFiZWx9ImApOwogICAgfQogIH0KICBmb3IgKGNvbnN0IHJldmVhbCBvZiByZXZlYWxzKSB7CiAgICBpZiAoIWxhYmVscy5pbmNsdWRlcyhyZXZlYWwpKSB7CiAgICAgIGlzc3Vlcy5wdXNoKGBjb2hvcnQgcmV2ZWFscyBpbmNsdWRlIHVua25vd24gYmlkZGVyICIke3JldmVhbH0iYCk7CiAgICB9CiAgfQoKICAvLyAzLiBMaWZlY3ljbGUgbXVzdCBiZSBvcmRlcmVkIGFuZCBlbmQgaW4gZXhhY3RseSBvbmUgc2V0dGxlLgogIGNvbnN0IHBoYXNlcyA9IHRyYWNlLmxpZmVjeWNsZS5tYXAoKGUpID0+IGUucGhhc2UpOwogIGNvbnN0IHNldHRsZUNvdW50ID0gcGhhc2VzLmZpbHRlcigocCkgPT4gcCA9PT0gInNldHRsZSIpLmxlbmd0aDsKICBpZiAoc2V0dGxlQ291bnQgPT09IDApIHsKICAgIGlzc3Vlcy5wdXNoKCJsaWZlY3ljbGUgaXMgbWlzc2luZyBhIHNldHRsZSBwaGFzZSIpOwogIH0gZWxzZSBpZiAoc2V0dGxlQ291bnQgPiAxKSB7CiAgICBpc3N1ZXMucHVzaCgibGlmZWN5Y2xlIGNvbnRhaW5zIG1vcmUgdGhhbiBvbmUgc2V0dGxlIHBoYXNlIik7CiAgfQogIGlmIChwaGFzZXMubGVuZ3RoID4gMCAmJiBwaGFzZXNbcGhhc2VzLmxlbmd0aCAtIDFdICE9PSAic2V0dGxlIikgewogICAgaXNzdWVzLnB1c2goYGxpZmVjeWNsZSBtdXN0IGVuZCBpbiBzZXR0bGUsIGdvdCAiJHtwaGFzZXNbcGhhc2VzLmxlbmd0aCAtIDFdfSJgKTsKICB9CgogIC8vIDQuIFNldHRsZW1lbnQgb3V0Y29tZSBtdXN0IGJlIHByZXNlbnQgYW5kIHJlZmVyZW5jZSBhIHdpbm5lci4KICBpZiAoIXRyYWNlLmtlZXBlci5jbGVhcldpbm5lciB8fCB0cmFjZS5rZWVwZXIuY2xlYXJXaW5uZXIudHJpbSgpID09PSAiIikgewogICAgaXNzdWVzLnB1c2goImtlZXBlci5jbGVhcldpbm5lciBtdXN0IGJlIHNldCB0byB0aGUgc2V0dGxlIHdpbm5lciIpOwogIH0gZWxzZSBpZiAoIWxhYmVscy5pbmNsdWRlcyh0cmFjZS5rZWVwZXIuY2xlYXJXaW5uZXIpKSB7CiAgICBpc3N1ZXMucHVzaChga2VlcGVyLmNsZWFyV2lubmVyICIke3RyYWNlLmtlZXBlci5jbGVhcldpbm5lcn0iIGlzIG5vdCBhIGJpZGRlcmApOwogIH0KCiAgaWYgKGlzc3Vlcy5sZW5ndGggPiAwKSB7CiAgICB0aHJvdyBuZXcgRGVtb1RyYWNlU2hhcGVFcnJvcihpc3N1ZXMpOwogIH0KfQoKZXhwb3J0IGFzeW5jIGZ1bmN0aW9uIHdyaXRlRGVtb1RyYWNlKAogIHBhdGg6IHN0cmluZywKICB0cmFjZTogRGVtb1RyYWNlUGF5bG9hZCwKICBsb2dnZXI6IExvZ2dlciA9IGRpYWdub3N0aWNzLAopOiBQcm9taXNlPHZvaWQ+IHsKICBhc3NlcnRDYW5vbmljYWxEZW1vVHJhY2UodHJhY2UpOwogIGNvbnN0IG91dCA9IHJlcG9QYXRoKHBhdGgpOwogIGF3YWl0IG1rZGlyKGRpcm5hbWUob3V0KSwgeyByZWN1cnNpdmU6IHRydWUgfSk7CiAgY29uc3QgYm9keSA9IFsKICAgICIvLyBHZW5lcmF0ZWQgYnkgYHBucG0gYWdlbnRzOmUyZWAg4oCUIGNhbm9uaWNhbCBqdXJ5IGRlbW8gdHJhY2UuIiwKICAgICIvLyBEbyBub3QgZWRpdCBieSBoYW5kOyByZS1ydW4gYWdlbnRzOmUyZSB0byByZWZyZXNoLiIsCiAgICAiIiwKICAgIGBleHBvcnQgY29uc3QgREVNT19UUkFDRSA9ICR7SlNPTi5zdHJpbmdpZnkodHJhY2UsIG51bGwsIDIpfSBhcyBjb25zdDtgLAogICAgIiIsCiAgXS5qb2luKCJcbiIpOwogIGF3YWl0IHdyaXRlRmlsZShvdXQsIGJvZHkpOwogIGxvZ2dlci5pbmZvKCJ3ZWItZGVtby10cmFjZSIsICIgICAg4pyUIHdlYiBkZW1vIHRyYWNlOiIsIHsgIm91dF8wIjogb3V0IH0pOwp9Cg==
+// Copyright (c) 2026 Sub Rosa contributors
+import { createLogger, type Logger } from '@sub-rosa/logging';
+const diagnostics = createLogger("services.agent.src.write-demo-trace");
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+
+export interface DemoTracePayload {
+  meta: {
+    title: string;
+    network: string;
+    contractId: string;
+    roundId: number;
+    revealRound: number;
+    clearingRule: "HighestBid" | "LowestBid";
+    recordedAt: string;
+    roundStatus: string;
+    liveE2e: string[];
+    proofScope: string;
+  };
+  lifecycle: Array<{
+    phase: string;
+    label: string;
+    detail: string;
+    status: "done" | "active" | "pending";
+  }>;
+  bidders: Array<{
+    label: string;
+    address: string;
+    role: "agent" | "human";
+    escrowUsdc: number;
+    bidUsdc: number | null;
+    revealed: boolean;
+    valid: boolean;
+    winner: boolean;
+  }>;
+  agents: Array<{
+    name: string;
+    principal: string;
+    sessionKey: string;
+    mandate: {
+      maxBidUsdc: number;
+      maxEscrowUsdc: number;
+      maxAppraisalSpendUsdc: number;
+      cappedAtMaxBid: boolean;
+    };
+    appraisal: {
+      fairValue: number;
+      suggestedMaxBid: number;
+      inputsHash: string;
+    };
+    x402: { priceUsdc: number; settled: boolean };
+    commitTx?: string;
+  }>;
+  keeper: {
+    drandRound: number;
+    blsVerifiedOnChain: boolean;
+    reveals: string[];
+    clearWinner?: string;
+    contractBalanceFinal: number;
+  };
+  settlement: {
+    operatorReceivedUsdc: number;
+    refundsUsdc: number;
+    note: string;
+  };
+  auditor: {
+    source: string;
+    generatedAt: string;
+    secretHex: string;
+    publicHex: string;
+    blobs: Record<string, string>;
+  };
+}
+
+const repoPath = (path: string) =>
+  path.startsWith("/") ? path : resolve(process.cwd(), "../..", path);
+
+export async function writeDemoTrace(
+  path: string,
+  trace: DemoTracePayload,
+  logger: Logger = diagnostics,
+): Promise<void> {
+  const out = repoPath(path);
+  await mkdir(dirname(out), { recursive: true });
+  const body = [
+    "// Generated by `pnpm agents:e2e` — canonical jury demo trace.",
+    "// Do not edit by hand; re-run agents:e2e to refresh.",
+    "",
+    `export const DEMO_TRACE = ${JSON.stringify(trace, null, 2)} as const;`,
+    "",
+  ].join("\n");
+  await writeFile(out, body);
+  logger.info("web-demo-trace", "    ✔ web demo trace:", { "out_0": out });
+}

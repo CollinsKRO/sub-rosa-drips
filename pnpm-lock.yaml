@@ -298,6 +298,9 @@ importers:
         specifier: workspace:*
         version: link:../../packages/logging
     devDependencies:
+      '@sub-rosa/tlock':
+        specifier: workspace:*
+        version: link:../../packages/tlock
       '@types/node':
         specifier: ^25.9.1
         version: 25.9.1
