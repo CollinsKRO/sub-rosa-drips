@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Sub Rosa contributors
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import type { RoundStatus } from "@sub-rosa/sdk";
 import { AgentActivity, KeeperPanel, X402Logs } from "../components/AgentPanels";
 import { AttackDemo } from "../components/AttackDemo";
 import { AuditorView } from "../components/AuditorView";
@@ -26,6 +27,7 @@ import {
 import { formatCountdown, useDrandCountdown } from "../hooks/useDrandCountdown";
 import { useRoundSession, type ActionStatus } from "../hooks/useRoundSession";
 import { getRoundStatusInfo } from "../lib/round-status";
+import { useRevealPhase } from "../lib/use-reveal-phase";
 import { shortAddr } from "../lib/format";
 import { RoundStatusBadge } from "../components/RoundStatusBadge";
 import { LOGO_SRC } from "../lib/chain";
@@ -87,6 +89,7 @@ function PhaseGuide(props: {
   revealedCount: number;
   commitSecondsRemaining: number | null;
   commitClosed: boolean;
+  networkMismatch: { chainNetwork: string; sdkNetwork: string } | null;
   drandGate: ReturnType<typeof useDrandCountdown>;
   status: ActionStatus;
   entryValue: number;
@@ -107,6 +110,7 @@ function PhaseGuide(props: {
     revealedCount,
     commitSecondsRemaining,
     commitClosed,
+    networkMismatch,
     drandGate,
     status,
     entryValue,
@@ -221,6 +225,19 @@ function PhaseGuide(props: {
     timerValue = "live";
     ctaLabel = "Open + reveal";
     cta = openAndReveal;
+  }
+
+  if (networkMismatch) {
+    tone = "danger";
+    eyebrow = "Network mismatch";
+    title = "Wrong wallet network";
+    detail = `Connected wallet is on ${networkMismatch.chainNetwork}, but this demo submits to ${networkMismatch.sdkNetwork}. Switch Freighter to ${networkMismatch.sdkNetwork} and reconnect before committing, revealing, or settling.`;
+    timerLabel = "Wallet";
+    timerValue = networkMismatch.chainNetwork;
+    ctaLabel = "Network mismatch";
+    ctaDisabled = true;
+    showInput = false;
+    showJoin = false;
   }
 
   if (working) {
@@ -495,6 +512,7 @@ function LivePanel({
     drandGate,
     commitSecondsRemaining,
     commitClosed,
+    networkMismatch,
     revealedCount,
     committed,
     commitValue,
@@ -586,6 +604,7 @@ function LivePanel({
         revealedCount={revealedCount}
         commitSecondsRemaining={commitSecondsRemaining}
         commitClosed={commitClosed}
+        networkMismatch={networkMismatch}
         drandGate={drandGate}
         status={status}
         entryValue={entryValue}
@@ -759,7 +778,7 @@ function ComparisonMini({ useCase, committed }: { useCase: UseCase; committed: b
   );
 }
 
-function EvidencePanel() {
+function EvidencePanel({ phase }: { phase: "Open" | "Reveal" | "Settled" }) {
   return (
     <div className="evidence-stack">
       <p className="evidence-intro">
@@ -767,7 +786,7 @@ function EvidencePanel() {
         demo, agents, and auditor tools.
       </p>
       <MainnetProofCard />
-      <LifecycleView trace={DEMO_TRACE} />
+      <LifecycleView status={DEMO_TRACE.meta.roundStatus as RoundStatus} />
       <AttackDemo />
       <SettlementRail trace={DEMO_TRACE} />
       <AgentActivity trace={DEMO_TRACE} />
@@ -792,6 +811,9 @@ export function DemoPage({
   const [mode, setMode] = useState<DemoMode>("live");
   const [confettiTick, setConfettiTick] = useState(0);
   const session = useRoundSession(active);
+  // One shared phase decision for every view in the evidence stack — the
+  // attack demo must agree with the observer on when values become public.
+  const { phase } = useRevealPhase({ trace: DEMO_TRACE, live: null });
   const sidebarDrand =
     mode === "evidence"
       ? { mode: "proof" as const, targetRound: DEMO_TRACE.meta.revealRound }
@@ -870,7 +892,7 @@ export function DemoPage({
                 onCelebrate={() => setConfettiTick((t) => t + 1)}
               />
             ) : (
-              <EvidencePanel />
+              <EvidencePanel phase={phase} />
             )}
           </motion.section>
         </AnimatePresence>
