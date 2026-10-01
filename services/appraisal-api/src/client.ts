@@ -12,6 +12,12 @@ import type { Network, PaymentRequired, SettleResponse } from "@x402/core/types"
 import { createEd25519Signer } from "@x402/stellar";
 import { ExactStellarScheme as ClientStellarScheme } from "@x402/stellar/exact/client";
 
+import {
+  assertAppraisalBodyBytes,
+  MAX_APPRAISAL_BODY_BYTES,
+} from "./appraisal.js";
+import { normalizeError } from "@sub-rosa/logging/errors";
+
 export interface PaidClientConfig {
   /** Payer secret key (S...). Needs a USDC trustline + balance. */
   secret: string;
@@ -19,6 +25,21 @@ export interface PaidClientConfig {
   network?: Network;
   /** Optional custom Soroban RPC URL. */
   rpcUrl?: string;
+  /**
+   * Expected payment quote. When set, the 402 offer is validated before any
+   * signed payment is built: asset/destination must match, amount must be
+   * within `maxAmountStroops`, and the offer must not be expired. Mismatch
+   * throws AppraisalQuoteRefusalError and no second (paid) fetch happens.
+   */
+  expectedQuote?: {
+    asset?: string;
+    destination?: string;
+    maxAmountStroops: bigint;
+    /** Absolute expiry (unix seconds). Defaults to 402 maxTimeout window. */
+    expiresAt?: number;
+    /** Clock for expiry checks. Defaults to wall clock. */
+    nowSeconds?: number;
+  };
 }
 
 export interface PaidResult<T = unknown> {
@@ -47,12 +68,42 @@ export class AppraisalResponseParseError extends Error {
 }
 
 export class X402PaymentError extends Error {
-  readonly name = "X402PaymentError";
+  override readonly name: string = "X402PaymentError";
   readonly status?: number;
 
   constructor(message: string, status?: number) {
     super(message);
     this.status = status;
+  }
+}
+
+export type AppraisalQuoteRefusalCode =
+  | "QUOTE_EXCEEDS_CAP"
+  | "QUOTE_SPEND_EXCEEDED"
+  | "QUOTE_ASSET_MISMATCH"
+  | "QUOTE_DESTINATION_MISMATCH"
+  | "QUOTE_EXPIRED"
+  | "QUOTE_INVALID"
+  | "QUOTE_BODY_EMPTY"
+  | "QUOTE_BODY_OVERSIZED"
+  | "QUOTE_BODY_CREDENTIALS";
+
+/** Typed refusal — no payment is submitted when this is thrown. */
+export class AppraisalQuoteRefusalError extends X402PaymentError {
+  override readonly name: string = "AppraisalQuoteRefusalError";
+  readonly code: AppraisalQuoteRefusalCode;
+
+  constructor(code: AppraisalQuoteRefusalCode, message: string, status?: number) {
+    super(message, status);
+    this.code = code;
+  }
+
+  toTraceRecord(): { type: "appraisal-quote-refusal"; code: string; message: string } {
+    return {
+      type: "appraisal-quote-refusal",
+      code: this.code,
+      message: this.message,
+    };
   }
 }
 
@@ -107,6 +158,7 @@ export interface PaidFetchOptions {
   nowSeconds?: () => number;
 }
 
+export { MAX_APPRAISAL_BODY_BYTES };
 async function parseJsonResponse<T>(res: Response): Promise<T> {
   const text = await res.text();
   if (!text.trim()) {
@@ -240,6 +292,181 @@ export function assertChallengeMatchesQuote(
   }
 }
 
+function requestBodyText(init: RequestInit): string | undefined {
+  const body = init.body;
+  if (body == null) return undefined;
+  if (typeof body === "string") return body;
+  return undefined;
+}
+
+/** Guard the outgoing appraisal body: empty/oversized/credential-like → refuse. */
+export function assertPaidRequestBodyAllowed(
+  init: RequestInit,
+  opts?: { requireBody?: boolean },
+): void {
+  const requireBody = opts?.requireBody ?? true;
+  const text = requestBodyText(init);
+  if (text === undefined) {
+    if (!requireBody) return;
+    throw new AppraisalQuoteRefusalError("QUOTE_BODY_EMPTY", "appraisal body must not be empty");
+  }
+  try {
+    assertAppraisalBodyBytes(text);
+  } catch (e) {
+    const msg = normalizeError(e).message;
+    if (/empty/.test(msg)) {
+      if (!requireBody && text.trim().length === 0) {
+        // Probe (unpaid) path tolerates empty to preserve 402 negotiation;
+        // the paid retry below still fails closed via requireBody: true.
+        return;
+      }
+      throw new AppraisalQuoteRefusalError("QUOTE_BODY_EMPTY", msg);
+    }
+    if (/exceeds/.test(msg)) {
+      throw new AppraisalQuoteRefusalError("QUOTE_BODY_OVERSIZED", msg);
+    }
+    throw new AppraisalQuoteRefusalError("QUOTE_BODY_CREDENTIALS", msg);
+  }
+}
+
+/** Decimal (e.g. "0.10") or integer stroops quote amount → stroops bigint. */
+export function quoteAmountToStroops(amount: unknown): bigint {
+  if (typeof amount === "bigint") {
+    if (amount <= 0n) {
+      throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote amount must be positive");
+    }
+    return amount;
+  }
+  if (typeof amount !== "string" || amount.trim() === "") {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote amount must be a non-empty string");
+  }
+  const s = amount.trim();
+  if (/^(0|[1-9]\d*)$/.test(s)) {
+    // Ambiguous: could be stroops or whole USDC. x402 stellar quotes are
+    // human-decimal, so a bare integer means whole USDC → scale to stroops,
+    // unless it is clearly already in stroops range (handled by caller via
+    // explicit stroops path). Here we treat bare integers as stroops only when
+    // they exceed any plausible decimal-USDC scale is unsafe — so instead we
+    // require decimal form for sub-7-digit values? To stay deterministic, treat
+    // bare integers as stroops (server mints stroops strings for AppraisalQuote,
+    // x402 402 uses decimals with a dot). A 402 "1" (1 USDC) vs stroops "1"
+    // (dust) collision is resolved by preferring decimal-USDC for 402 amounts:
+    // see assertPaymentQuoteAllowed which passes the raw 402 amount through
+    // decimal parsing first.
+    const parsed = BigInt(s);
+    if (parsed <= 0n) {
+      throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote amount must be positive");
+    }
+    return parsed;
+  }
+  const n = Number(s);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote amount must be a positive number");
+  }
+  const stroops = Math.round(n * 1e7);
+  if (!Number.isSafeInteger(stroops) || stroops <= 0) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote amount is out of stroop-safe range");
+  }
+  return BigInt(stroops);
+}
+
+/** x402 402 amounts are human-decimal USDC ("0.10") — always scale to stroops. */
+export function paymentRequiredAmountToStroops(amount: unknown): bigint {
+  if (typeof amount !== "string" || amount.trim() === "") {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote amount must be a non-empty string");
+  }
+  const n = Number(amount.trim());
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote amount must be a positive number");
+  }
+  const stroops = Math.round(n * 1e7);
+  if (!Number.isSafeInteger(stroops) || stroops <= 0) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "quote amount is out of stroop-safe range");
+  }
+  return BigInt(stroops);
+}
+
+type AcceptsEntry = {
+  asset?: unknown;
+  payTo?: unknown;
+  amount?: unknown;
+  maxAmountRequired?: unknown;
+  maxTimeoutSeconds?: unknown;
+  extra?: Record<string, unknown> | null;
+};
+
+/**
+ * Validate a 402 payment offer against the expected quote. Throws
+ * AppraisalQuoteRefusalError on cap/asset/destination/expiry drift. Pure and
+ * fixture-friendly: pass a PaymentRequired-shaped object, no network needed.
+ */
+export function assertPaymentQuoteAllowed(
+  paymentRequired: { accepts?: AcceptsEntry[] },
+  expected: NonNullable<PaidClientConfig["expectedQuote"]>,
+): void {
+  const accepts = paymentRequired.accepts;
+  if (!Array.isArray(accepts) || accepts.length === 0) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "x402 quote has no accepts entry");
+  }
+  const entry = accepts[0] as AcceptsEntry;
+  const asset = typeof entry.asset === "string" ? entry.asset : "";
+  const payTo = typeof entry.payTo === "string" ? entry.payTo : "";
+  const rawAmount = entry.amount ?? entry.maxAmountRequired;
+  if (!asset) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "x402 quote is missing asset");
+  }
+  if (!payTo) {
+    throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "x402 quote is missing destination");
+  }
+  if (expected.asset !== undefined && asset !== expected.asset) {
+    throw new AppraisalQuoteRefusalError(
+      "QUOTE_ASSET_MISMATCH",
+      `appraisal quote asset ${asset} does not match expected ${expected.asset}`,
+    );
+  }
+  if (expected.destination !== undefined && payTo !== expected.destination) {
+    throw new AppraisalQuoteRefusalError(
+      "QUOTE_DESTINATION_MISMATCH",
+      `appraisal quote destination ${payTo} does not match expected ${expected.destination}`,
+    );
+  }
+  const amount = paymentRequiredAmountToStroops(rawAmount);
+  if (amount > expected.maxAmountStroops) {
+    throw new AppraisalQuoteRefusalError(
+      "QUOTE_EXCEEDS_CAP",
+      `appraisal quote ${amount} exceeds mandate cap ${expected.maxAmountStroops}`,
+    );
+  }
+  const nowSeconds =
+    expected.nowSeconds ?? Math.floor(Date.now() / 1000);
+  if (expected.expiresAt !== undefined) {
+    if (!Number.isSafeInteger(expected.expiresAt) || expected.expiresAt < 0) {
+      throw new AppraisalQuoteRefusalError("QUOTE_INVALID", "expected expiresAt is invalid");
+    }
+    if (nowSeconds > expected.expiresAt) {
+      throw new AppraisalQuoteRefusalError(
+        "QUOTE_EXPIRED",
+        `appraisal quote expired at ${expected.expiresAt} (now ${nowSeconds})`,
+      );
+    }
+  }
+  const timeout = entry.maxTimeoutSeconds;
+  if (typeof timeout === "number") {
+    if (!Number.isFinite(timeout) || timeout <= 0) {
+      throw new AppraisalQuoteRefusalError("QUOTE_EXPIRED", "appraisal quote window has expired");
+    }
+    const extraExpires =
+      entry.extra && typeof entry.extra.expiresAt === "number"
+        ? (entry.extra.expiresAt as number)
+        : undefined;
+    if (extraExpires !== undefined && nowSeconds > extraExpires) {
+      throw new AppraisalQuoteRefusalError(
+        "QUOTE_EXPIRED",
+        `appraisal quote expired at ${extraExpires} (now ${nowSeconds})`,
+      );
+    }
+  }
+}
 /** Build a paid-fetch function bound to a payer wallet. */
 export function createPaidFetch(config: PaidClientConfig) {
   const network = config.network ?? "stellar:testnet";
@@ -256,6 +483,10 @@ export function createPaidFetch(config: PaidClientConfig) {
     init: RequestInit = {},
     options: PaidFetchOptions = {},
   ): Promise<PaidResult<T>> {
+    // Probe path tolerates a missing body (generic GETs, legacy callers);
+    // oversized / credential-like bodies still fail here with no payment.
+    assertPaidRequestBodyAllowed(init, { requireBody: false });
+
     const first = await fetch(url, init);
     if (first.status !== 402) {
       return { status: first.status, body: await parseJsonResponse<T>(first) };
@@ -289,6 +520,22 @@ export function createPaidFetch(config: PaidClientConfig) {
       throw new QuoteMismatchError("empty-challenge", first.status);
     }
     assertChallengeMatchesQuote(paymentRequired, options.expectedQuote, options.nowSeconds);
+
+    // Bind the quote to the mandate before any Stellar transfer.
+    if (config.expectedQuote) {
+      assertPaymentQuoteAllowed(
+        paymentRequired as unknown as { accepts?: AcceptsEntry[] },
+        config.expectedQuote,
+      );
+      // Re-check the body right before signing: a retry or config change must
+      // not smuggle an unsafe body into the paid second fetch.
+      assertPaidRequestBodyAllowed(init);
+    } else {
+      // Legacy / generic callers without a mandate guard: still never pay for
+      // oversized or credential-bearing bodies, but tolerate a missing body so
+      // response-parsing tests keep their stable errors.
+      assertPaidRequestBodyAllowed(init, { requireBody: false });
+    }
 
     const payload = await http.createPaymentPayload(paymentRequired);
     const payHeaders = http.encodePaymentSignatureHeader(payload);

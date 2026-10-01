@@ -100,6 +100,38 @@ export function runCapSafetyDemos(): CapDemoResult[] {
   return results;
 }
 
+/** The base64 "broken seal" used by the seal-off (leaky) attack column. */
+export function sealOffCipher(value: bigint, nonce: Uint8Array): string {
+  const plaintext = encodeBidPreimage(value, nonce);
+  return Buffer.from(plaintext).toString("base64");
+}
+
+/** The early read the broken baseline allows. Returns the recovered value, or
+ *  throws when the read path is sealed (i.e. safe). */
+export async function earlyReadBid(
+  fakeCipher: string,
+  client: ReturnType<typeof quicknet>,
+): Promise<bigint> {
+  const decoded = Buffer.from(fakeCipher, "base64");
+  if (decoded.length === 0) throw new Error("empty ciphertext");
+  // With the seal off, the preimage is recoverable without Drand R — that is
+  // the bug this demo teaches. The tlock path (seal on) must fail here; the
+  // caller records that failure instead of ever formatting a value.
+  const clientAny = client as unknown as { __sealedEarlyRead?: () => never };
+  if (typeof clientAny.__sealedEarlyRead === "function") {
+    clientAny.__sealedEarlyRead();
+  }
+  return decodeFirstValue(decoded);
+}
+
+function decodeFirstValue(decoded: Buffer): bigint {
+  let v = 0n;
+  for (let i = 0; i < 16; i++) {
+    v = (v << 8n) | BigInt(decoded[i] ?? 0);
+  }
+  return v;
+}
+
 /** Live tlock seal-on vs plaintext seal-off comparison using quicknet. */
 export async function runSealAttackDemo(): Promise<{
   sealOff: AttackStep[];
@@ -115,19 +147,18 @@ export async function runSealAttackDemo(): Promise<{
   const sealOn: AttackStep[] = [];
 
   // ── Seal OFF: plaintext / operator-readable "encryption" ───────────────
-  const plaintext = encodeBidPreimage(value, nonce);
-  const fakeCipher = Buffer.from(plaintext).toString("base64");
+  const fakeCipher = sealOffCipher(value, nonce);
   sealOff.push({
     label: "Bid stored as reversible encoding (no tlock)",
     ok: true,
     detail: `Observer decodes bid immediately: ${Number(value) / 1e7} USDC equivalent`,
   });
   try {
-    const decoded = Buffer.from(fakeCipher, "base64");
+    await earlyReadBid(fakeCipher, client);
     sealOff.push({
       label: "Early read succeeds before Drand R",
       ok: true,
-      detail: `Plaintext preimage recovered (${decoded.length} bytes) — front-running / selective abort possible`,
+      detail: "Plaintext preimage recovered — front-running / selective abort possible",
     });
   } catch {
     sealOff.push({ label: "Early read", ok: false, detail: "unexpected failure" });
