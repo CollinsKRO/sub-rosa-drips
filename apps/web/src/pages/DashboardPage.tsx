@@ -51,7 +51,7 @@ function LoadingState() {
 
 export function DashboardPage({ goHome }: { goHome: () => void }) {
   const reduce = useReducedMotion();
-  const { data, loading, error, stale, refetch } = useDashboardData();
+  const { data, loading, error, stale, refetch, snapshot } = useDashboardData();
 
   const transition = reduce
     ? { duration: 0 }
@@ -110,11 +110,11 @@ export function DashboardPage({ goHome }: { goHome: () => void }) {
           transition={{ ...transition, delay: 0.1 }}
         >
           <div className="dashboard-column">
-            <RoundStatusCard data={data} />
+            <RoundStatusCard data={data} snapshot={snapshot!} />
             <SettlementCard data={data} />
           </div>
           <div className="dashboard-column">
-            <KeeperStatusCard data={data} />
+            <KeeperStatusCard data={data} snapshot={snapshot!} />
             <BidderProgressCard data={data} />
           </div>
         </motion.div>

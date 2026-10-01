@@ -164,6 +164,8 @@ export {
   type KeeperStatusResponse,
   type KeeperHealthResponse,
   type ApiError,
+  type DashboardPhase,
+  type DashboardSnapshot,
 } from "./status.js";
 
 // Fetch client for the keeper status API.
