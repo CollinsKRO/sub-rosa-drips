@@ -64,6 +64,7 @@ export {
 } from "./checkpoint.js";
 export {
   createStatusServer,
+  createStatusHandler,
   withGracefulShutdown,
   bigintReplacer as statusBigintReplacer,
   type StatusServerConfig,

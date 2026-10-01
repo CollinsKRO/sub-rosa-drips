@@ -13,6 +13,9 @@ export interface WatchedRound {
   network?: string;
   revealRound?: string;
   lastStatus: string;
+  phase?: KeeperDryRunPhase;
+  cursor?: number | string;
+  lastHash?: string;
   retryCount: number;
   lastError?: string;
   lastAction?: string;
