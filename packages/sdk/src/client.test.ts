@@ -14,6 +14,7 @@ import type {
   SubmitSignedTransactionParams,
   TransactionSubmitter,
 } from "./submitter.js";
+import { sealFixture, fixtureBinding } from "./testing/seal-fixture.js";
 
 const BASE_CONFIG = {
   rpcUrl: "https://example.com",
@@ -237,15 +238,17 @@ describe("SubRosaClient source configuration", () => {
   it("rejects commit without a bidder source using a typed error", async () => {
     const client = new SubRosaClient(BASE_CONFIG);
 
+    // A real seal: commit() runs the sealed-bid gate before it resolves the
+    // bidder source, so a placeholder blob would fail on its own terms and
+    // this test would stop being about the source check.
+    const sealed = await sealFixture();
+
     await assert.rejects(
       client.commit({
         roundId: 1,
-        sealed: {
-          commitment: new Uint8Array(32),
-          ciphertext: new Uint8Array([0x61, 0x67, 0x65]), // non-empty
-          auditorBlob: new Uint8Array(1), // non-empty
-        },
+        sealed,
         escrow: 1n,
+        binding: fixtureBinding(),
       }),
       (error: unknown) => {
         assert.ok(error instanceof SubRosaClientConfigError);

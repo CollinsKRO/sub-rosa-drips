@@ -10,8 +10,8 @@ use crate::types::{ClearingRule, DataKey, Error, Status};
 
 use super::{
     assert_try_create_round_err, assert_try_contract_err, b32, commit_bid, commitment,
-    drand_round, funded_bidder, open_round, real_sig, sac_asset_config, setup, setup_drand,
-    Fixture, GENESIS, PERIOD, VEC_ROUND,
+    drand_round, funded_bidder, native_xlm, open_round, real_sig, setup, setup_drand, Fixture,
+    GENESIS, PERIOD, VEC_ROUND,
 };
 
 const MAX_BIDDERS: u32 = 500;
@@ -218,7 +218,7 @@ fn error_path_commit_deadline_after_reveal() {
             &2_000,
             &2_500,
             &Bytes::from_array(&f.env, b"a"),
-            &sac_asset_config(&f.env),
+            &native_xlm(&f.env),
         ),
         Error::CommitDeadlineAfterReveal,
     );
@@ -374,7 +374,7 @@ fn error_path_invalid_drand_signature() {
         &commit_deadline,
         &reveal_deadline,
         &Bytes::from_array(&f.env, b"auditor"),
-        &sac_asset_config(&f.env),
+        &native_xlm(&f.env),
     );
     let bidder = funded_bidder(&f, 1_000);
     commit_bid(&f, id, &bidder, 100, 100, 0x01);
@@ -429,7 +429,7 @@ fn error_path_payload_too_large() {
             &1_500,
             &2_500,
             &oversized_bytes(&f.env, 1025),
-            &sac_asset_config(&f.env),
+            &native_xlm(&f.env),
         ),
         Error::PayloadTooLarge,
     );
@@ -492,7 +492,7 @@ fn error_path_deadline_in_past() {
             &500,
             &2_500,
             &Bytes::from_array(&f.env, b"a"),
-            &sac_asset_config(&f.env),
+            &native_xlm(&f.env),
         ),
         Error::DeadlineInPast,
     );

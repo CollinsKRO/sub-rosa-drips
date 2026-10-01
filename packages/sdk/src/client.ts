@@ -28,8 +28,9 @@ import {
 } from "@sub-rosa/round-bindings/event-snapshot";
 import { toHex } from "@sub-rosa/tlock";
 import type { SealedBid } from "@sub-rosa/tlock";
-import type { RoundReceipt, RoundReceiptEvent } from "./receipt.js";
-import { validateEncryptedBlob } from "./encrypted-blob.js";
+import type { RoundReceipt } from "./receipt.js";
+import { assertSealedBid } from "./encrypted-blob.js";
+import type { SealedBidBinding } from "./encrypted-blob.js";
 import { networkFingerprint } from "./receipt.js";
 import type { TransactionSubmitter } from "./submitter.js";
 import {
@@ -39,6 +40,7 @@ import {
   type PreflightResult,
 } from "./preflight.js";
 import {
+  SubRosaAssetValidationError,
   SubRosaClientConfigError,
   SubRosaPaginationError,
   SubRosaMissingReturnValueError,
@@ -107,16 +109,29 @@ export interface SubRosaClientConfig {
    * If not provided, no asset validation is performed.
    */
   assetConfig?: import("./asset-config.js").AssetConfig;
-
   /**
    * @internal Testing hook: inject a mock Soroban RPC server for simulation.
    */
   _server?: rpc.Server;
-  /** Optional passkey session to bind commits and client operations to. */
-  session?: PasskeySessionBinding;
 }
 
 export type ClearingRuleTag = ClearingRule["tag"];
+
+/**
+ * The contract's `RoundAssetConfig` (contracts/round/src/types.rs).
+ *
+ * Declared here rather than imported because the generated bindings in this
+ * tree predate the `asset_config` argument on `create_round`; the shape mirrors
+ * the Rust struct exactly. Once the bindings are regenerated this type and the
+ * accompanying cast at the call site can both be dropped.
+ */
+interface RoundAssetConfig {
+  asset_type: string;
+  contract_id: string;
+  code: string;
+  decimals: number;
+  issuer: string;
+}
 
 export interface CreateRoundParams {
   /** sha256 (or any opaque 32-byte ref) of the off-chain item description. */
@@ -145,8 +160,16 @@ export interface CommitParams {
   escrow: bigint;
   /** Bidder address. Default: the configured signer's public key. */
   bidder?: string;
-  /** Optional passkey session to bind this commit to. */
-  session?: PasskeySessionBinding;
+  /**
+   * The value, nonce, and Drand round the seal was produced from.
+   *
+   * Supplying it makes `commit` verify the seal against them before submitting
+   * — same acceptance rule the sealer works to, so a blob that decodes but
+   * commits to the wrong value is rejected here instead of becoming an
+   * on-chain commitment the contract can never open. The value is never logged
+   * or included in the resulting error.
+   */
+  binding?: SealedBidBinding;
 }
 
 export interface RevealParams {
@@ -424,8 +447,25 @@ export class SubRosaClient {
     const clearing_rule = {
       tag: params.clearingRule ?? "HighestBid",
       values: undefined,
-    } as ClearingRule;
-    const assetConfig = this.#buildAssetConfig(params);
+    } as ClearingRule;    
+    // Build asset config for the round
+    let assetConfig: RoundAssetConfig = {
+      asset_type: "native",
+      contract_id: "",
+      code: "XLM",
+      decimals: 7,
+      issuer: "",
+    };
+    if (params.assetConfig) {
+      const { type, code, contractId, issuer, decimals } = params.assetConfig;
+      assetConfig = {
+        asset_type: type,
+        contract_id: contractId || "",
+        code: code || "XLM",
+        decimals: decimals ?? 7,
+        issuer: issuer || "",
+      };
+    }
     
     const tx = await this.#validatedContractCall(() =>
       this.contract.create_round({
@@ -437,42 +477,19 @@ export class SubRosaClient {
         reveal_deadline: toBigInt(params.revealDeadline),
         auditor_pubkey: toBuffer(params.auditorPubkey),
         asset_config: assetConfig,
-      }),
+      } as Parameters<typeof this.contract.create_round>[0]),
     );
 
     return this.#sendUnwrap(tx);
   }
 
   async commit(params: CommitParams): Promise<void> {
-    const session = params.session ?? this.#session;
-    if (session) {
-      validatePasskeySession(session, {
-        contractId: this.contractId,
-        networkPassphrase: this.networkPassphrase,
-        account: params.bidder ?? this.#source,
-      });
-    }
-
-    // Validate encrypted blobs before submitting — catches size/encoding
-    // issues early, before paying gas for an on-chain revert (PayloadTooLarge).
-    const ciphertextResult = validateEncryptedBlob(
-      params.sealed.ciphertext,
-      "ciphertext",
-    );
-    if (!ciphertextResult.valid) {
-      throw new SubRosaClientConfigError(
-        ciphertextResult.issues.map((i) => i.message).join("; "),
-      );
-    }
-    const auditorBlobResult = validateEncryptedBlob(
-      params.sealed.auditorBlob,
-      "auditor_blob",
-    );
-    if (!auditorBlobResult.valid) {
-      throw new SubRosaClientConfigError(
-        auditorBlobResult.issues.map((i) => i.message).join("; "),
-      );
-    }
+    // Gate the seal before submitting. Size/encoding defects surface here
+    // instead of as an on-chain PayloadTooLarge revert, and — when the caller
+    // passes the value/nonce/round it sealed from — a blob whose commitment
+    // does not match never reaches the chain, where it would be committed and
+    // never open.
+    assertSealedBid(params.sealed, params.binding);
 
     // Validate asset config matches the round's expected asset
     if (this.#assetConfig) {

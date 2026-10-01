@@ -64,6 +64,8 @@ export {
 
 export {
   validateEncryptedBlob,
+  validateSealedBid,
+  assertSealedBid,
   tryDecodeHex,
   tryDecodeBase64,
   MAX_CIPHERTEXT_BYTES,
@@ -71,6 +73,7 @@ export {
   type BlobContentType,
   type BlobValidationIssue,
   type BlobValidationResult,
+  type SealedBidBinding,
 } from "./encrypted-blob.js";
 export {
   MAINNET_ARTIFACTS,
