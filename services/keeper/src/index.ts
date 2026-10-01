@@ -57,3 +57,5 @@ export {
   type KeeperStatusResponse,
 } from "./status.js";
 export { runWatchLoop, type RunWatchLoopParams } from "./watch-loop.js";
+export { KeeperQueue, type KeeperQueueOptions } from "./queue.js";
+export { KeeperStore, type WatchedRound, type RoundIdInput } from "./store.js";
