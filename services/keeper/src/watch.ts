@@ -21,6 +21,7 @@ import { Keypair } from "@stellar/stellar-sdk";
 import { SubRosaClient } from "@sub-rosa/sdk";
 import { quicknet } from "@sub-rosa/tlock";
 
+import { KeeperCheckpointStore } from "./checkpoint.js";
 import { createSettlementGuard } from "./settlement-guard.js";
 import { KeeperStore } from "./store.js";
 import { KeeperQueue } from "./queue.js";
@@ -59,6 +60,9 @@ async function main() {
   });
 
   const store = new KeeperStore();
+  // Durable watch cursor. Refuses to start when the file on disk was recorded
+  // for another network or contract id.
+  const checkpoint = new KeeperCheckpointStore({ network: networkPassphrase, contractId });
   const settlementGuard = createSettlementGuard();
   const queue = new KeeperQueue(store, { contractId, network: networkPassphrase });
 
@@ -77,6 +81,7 @@ async function main() {
     store,
     queue,
     settlementGuard,
+    checkpoint,
     isStopping: () => stopping,
     owner: process.env.KEEPER_OWNER?.trim() || generateLeaseOwner(),
     leaseMs: parseLeaseMs(process.env.KEEPER_LEASE_MS),
